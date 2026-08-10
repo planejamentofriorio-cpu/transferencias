@@ -8,18 +8,24 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import traceback
 
-# --- CONFIGURAÇÕES DE ACESSO (SUPABASE TRANSACTION POOLER) ---
-CRED_SUPABASE = {
+# --- CONFIGURAÇÕES DE ACESSO ---
+CRED_OP = {
     "host": "aws-0-sa-east-1.pooler.supabase.com",
     "port": "6543",
     "dbname": "postgres",
     "user": "postgres.feaibbzfhvcllucprvvc",
     "password": "CliffBurton1982!",
-    "connect_timeout": 10
+    "connect_timeout": 5
 }
 
-CRED_OP = CRED_SUPABASE
-CRED_PLAN = CRED_SUPABASE
+CRED_PLAN = {
+    "host": "aws-0-sa-east-1.pooler.supabase.com",
+    "port": "6543",
+    "dbname": "postgres",
+    "user": "postgres.feaibbzfhvcllucprvvc",
+    "password": "CliffBurton1982!",
+    "connect_timeout": 5
+}
 
 # --- CONFIGURAÇÃO DE E-MAIL (SMTP DE SAÍDA) ---
 SMTP_SERVER = "smtp.office365.com"  
@@ -38,562 +44,780 @@ MAP_EMAILS_CDS = {
     "06 - São Paulo": "fernando.brito@friorio.com.br"    
 }
 
-TODOS_OS_EMAILS = [
-    EMAIL_PLANEJAMENTO,
-    EMAIL_COMPRAS,
-    EMAIL_TRANSPORTES
-] + list(MAP_EMAILS_CDS.values())
+TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS, EMAIL_TRANSPORTES] + list(MAP_EMAILS_CDS.values())
 
-def enviar_email(destinatarios, assunto, corpo_html):
-    if isinstance(destinatarios, str):
-        destinatarios = [destinatarios]
-    
-    destinatarios = list(set([d for d in destinatarios if d]))
-    
-    if not destinatarios:
-        return
-        
-    try:
-        msg = MIMEMultipart("alternative")
-        msg["From"] = SMTP_USER
-        msg["To"] = ", ".join(destinatarios)
-        msg["Subject"] = assunto
+# --- CONFIGURAÇÃO DA PÁGINA ---
+st.set_page_config(page_title="FrioRio - Fluxo de Transferências Inter-CD", layout="wide")
 
-        msg.attach(MIMEText(corpo_html, "html"))
-
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(SMTP_USER, SMTP_PASSWORD)
-        server.sendmail(SMTP_USER, destinatarios, msg.as_string())
-        server.quit()
-    except Exception as e:
-        st.error(f"Erro ao enviar e-mail de notificação: {e}")
+# Inicialização das variáveis de estado (Sessão)
+if 'logado' not in st.session_state:
+    st.session_state.logado = False
+if "erro_email" not in st.session_state:
+    st.session_state.erro_email = None
+if "carrinho_compras" not in st.session_state:
+    st.session_state.carrinho_compras = []
 
 def get_conn(cred):
     return psycopg2.connect(**cred)
 
-def autenticar_usuario(login, senha):
+# =============================================================================
+# MOTOR DE DISPARO DE E-MAILS
+# =============================================================================
+def disparar_email(destinatarios, assunto, corpo_html):
     try:
-        with get_conn(CRED_OP) as conn:
-            with conn.cursor(cursor_factory=extras.DictCursor) as cur:
-                cur.execute("""
-                    SELECT id, nome, login, departamento, email_pessoal, cd_responsavel 
-                    FROM usuarios 
-                    WHERE login = %s AND senha = %s AND ativo = TRUE
-                """, (login, senha))
-                user = cur.fetchone()
-                return dict(user) if user else None
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USER
+        if isinstance(destinatarios, list):
+            destinatarios_unicos = list(set(destinatarios))
+            msg['To'] = ", ".join(destinatarios_unicos)
+            lista_envio = destinatarios_unicos
+        else:
+            msg['To'] = destinatarios
+            lista_envio = [destinatarios]
+            
+        msg['Subject'] = assunto
+        msg.attach(MIMEText(corpo_html, 'html'))
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.sendmail(SMTP_USER, lista_envio, msg.as_string())
+        return True
     except Exception as e:
-        st.error(f"Erro ao conectar ao banco de dados: {e}")
-        return None
+        st.session_state.erro_email = {"mensagem": f"{type(e).__name__}: {str(e)}", "traceback": traceback.format_exc()}
+        return False
 
-def main():
-    st.set_page_config(page_title="Sistema de Transferências inter-CDs", layout="wide")
+# =============================================================================
+# GATILHOS DE E-MAIL
+# =============================================================================
+def email_modulo_1_multi(id_ordem, tabela_html, rota, total_itens):
+    assunto = f"🟡 Módulo 1: Nova Solicitação de Ordem de Carga Multi-Itens #{id_ordem}"
+    corpo = f"""
+    <html><body>
+        <h2>Nova Demanda de Transferência Criada (Agrupada)</h2>
+        <p>O setor de Compras inseriu uma nova ordem de carga contendo múltiplos itens.</p>
+        <ul>
+            <li><b>ID de Controle de Origem:</b> #{id_ordem}</li>
+            <li><b>Rota Comercial:</b> {rota}</li>
+            <li><b>Total de Itens na Carga:</b> {total_itens}</li>
+        </ul>
+        <br><h3>Itens Solicitados:</h3>{tabela_html}
+        <p><i>Ação necessária: Acessar o módulo de Planejamento para avaliar os itens.</i></p>
+    </body></html>
+    """
+    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
 
-    if 'usuario' not in st.session_state:
-        st.session_state['usuario'] = None
+def email_item_revisado_planejamento(id_solic, produto, rota, nova_qtd, justificativa):
+    assunto = f"🔄 Item #{id_solic} REVISADO por Compras - Nova Análise Necessária"
+    corpo = f"""
+    <html><body>
+        <h2>Item Recusado foi Corrigido por Compras</h2>
+        <p>O comprador revisou os parâmetros do item abaixo e o devolveu para a fila de aprovação.</p>
+        <ul>
+            <li><b>ID da Solicitação:</b> #{id_solic}</li>
+            <li><b>Produto:</b> {produto}</li>
+            <li><b>Rota:</b> {rota}</li>
+            <li><b>Nova Quantidade Solicitada:</b> {nova_qtd}</li>
+            <li><b>Justificativa do Comprador:</b> {justificativa}</li>
+        </ul>
+        <p><i>Por favor, reavalie este item no painel do Módulo de Planejamento.</i></p>
+    </body></html>
+    """
+    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
 
-    if st.session_state['usuario'] is None:
-        col1, col2, col3 = st.columns([1, 2, 1])
-        with col2:
-            st.title("🔐 Login de Acesso")
-            with st.form("form_login"):
-                login_input = st.text_input("Usuário (Login)")
-                senha_input = st.text_input("Senha", type="password")
-                btn_login = st.form_submit_button("Entrar")
-                
-                if btn_login:
-                    user = autenticar_usuario(login_input, senha_input)
-                    if user:
-                        st.session_state['usuario'] = user
-                        st.success(f"Bem-vindo, {user['nome']}!")
-                        st.rerun()
-                    else:
-                        st.error("Usuário ou senha incorretos, ou usuário inativo.")
-        return
+def email_lote_aprovados_planejamento(tabela_html, total_itens):
+    assunto = f"🟢 Módulo 2: {total_itens} Item(ns) de Transferência APROVADOS pelo Planejamento"
+    corpo = f"""
+    <html><body>
+        <h2>Itens de Carga Liberados para Separação</h2>
+        <p>O setor de Planejamento avaliou e aprovou os seguintes itens para movimentação entre as filiais.</p>
+        <br>{tabela_html}
+        <p><i>Ação necessária nos respectivos CDs de Origem: Iniciar os procedimentos de separação e cubagem.</i></p>
+    </body></html>
+    """
+    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
 
-    user = st.session_state['usuario']
-    st.sidebar.title(f"👤 {user['nome']}")
-    st.sidebar.caption(f"Depto: {user['departamento']}")
-    if st.sidebar.button("Sair (Logout)"):
-        st.session_state['usuario'] = None
+def email_lote_recusados_planejamento(tabela_html, total_itens):
+    assunto = f"🔴 Módulo 2: {total_itens} Item(ns) de Transferência RECUSADOS pelo Planejamento"
+    corpo = f"""
+    <html><body>
+        <h2 style="color: #d32f2f;">Solicitações de Transferência Recusadas</h2>
+        <p>Os itens listados abaixo foram analisados e <b>recusados</b> pela gerência de Planejamento.</p>
+        <br>{tabela_html}
+        <p><i>Os itens retornaram para o painel de Compras para correção de quantidades ou exclusão definitiva.</i></p>
+    </body></html>
+    """
+    disparar_email(EMAIL_COMPRAS, assunto, corpo)
+
+def email_modulo_3_resumido(rota, dados_logísticos, total_itens):
+    assunto = f"🔵 Módulo 3: Carga Consolidada Pronta para Transporte — Rota {rota}"
+    corpo = f"""
+    <html><body>
+        <h2>Dados Macroscópicos de Volumetria Disponíveis</h2>
+        <p>O CD de Origem finalizou a pesagem e cubagem de uma carga unificada.</p>
+        <ul>
+            <li><b>Rota de Movimentação:</b> {rota}</li>
+            <li><b>Total de Itens Diferentes:</b> {total_itens}</li>
+            <li><b>Soma Total de Volumes:</b> {dados_logísticos['qtd_vol']} cx / un</li>
+            <li><b>Peso Bruto Consolidado:</b> {dados_logísticos['peso_bruto']} kg</li>
+            <li><b>Cubagem Total do Lote:</b> {dados_logísticos['cubagem']} m³</li>
+        </ul>
+        <p><i>Ação necessária: Acessar o módulo de Transportes para vincular a transportadora e realizar o despacho rodoviário.</i></p>
+    </body></html>
+    """
+    disparar_email(EMAIL_TRANSPORTES, assunto, corpo)
+
+def email_modulo_4_resumido(rota, transportadora, data_prevista, total_itens):
+    assunto = f"🚀 Módulo 4: Carga da Rota {rota} Em Trânsito"
+    corpo = f"""<html><body><h2>Lote Despachado</h2><p>A carga consolidada da rota <b>{rota}</b> contendo {total_itens} item(ns) foi coletada e enviada via transportadora <b>{transportadora}</b>. Previsão de chegada: {data_prevista.strftime('%d/%m/%Y')}</p></body></html>"""
+    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
+
+def email_modulo_5_resumido(rota, cd_destino, data_agenda, hora_agenda, total_itens):
+    email_destinatario = MAP_EMAILS_CDS.get(cd_destino, EMAIL_PLANEJAMENTO)
+    assunto = f"📅 Módulo 5: Recebimento de Lote Agendado — Rota {rota}"
+    corpo = f"""<html><body><h2>Janela de Doca Marcada (Carga Consolidada)</h2><p>A carga da rota <b>{rota}</b> contendo {total_itens} produto(s) teve seu descarregamento agendado na filial de destino para o dia <b>{data_agenda.strftime('%d/%m/%Y')}</b> às <b>{hora_agenda}</b>.</p></body></html>"""
+    disparar_email(email_destinatario, assunto, corpo)
+
+def email_lote_concluido(nome_grupo, total_itens, html_tabela):
+    assunto = f"✅ PROCESSO CONCLUÍDO: Lote de Transferência Recebido — {nome_grupo}"
+    corpo = f"""
+    <html><body>
+        <h2>Fluxo Logístico de Transferência Finalizado</h2>
+        <p>O CD de destino realizou a conferência física e encerrou o lote de transferência: <b>{nome_grupo}</b>.</p>
+        <p><b>Total de Itens Avaliados:</b> {total_itens}</p>
+        <br><h3>Resumo do Recebimento por Item:</h3>
+        {html_tabela}
+        <p><i>Os saldos sistêmicos foram atualizados com sucesso nas filiais correspondentes.</i></p>
+    </body></html>
+    """
+    disparar_email(TODOS_ENVOLVIDOS, assunto, corpo)
+
+
+# --- EXIBIÇÃO DE ERROS LOGÍSTICOS NO TOPO ---
+if st.session_state.erro_email:
+    with st.container(border=True):
+        st.error("❌ Erro no envio da notificação por e-mail:")
+        st.code(st.session_state.erro_email["mensagem"], language="text")
+        if st.button("Limpar aviso de erro", use_container_width=True):
+            st.session_state.erro_email = None
+            st.rerun()
+
+# --- TELA DE LOGIN ---
+if not st.session_state.logado:
+    st.title("🚚 Sistema de Transferências Entre CDs")
+    with st.container(border=True):
+        u = st.text_input("Usuário")
+        s = st.text_input("Senha", type="password")
+        if st.button("Acessar Sistema", use_container_width=True):
+            try:
+                with get_conn(CRED_OP) as conn:
+                    with conn.cursor(cursor_factory=extras.DictCursor) as cur:
+                        cur.execute("SELECT nome, departamento, cd_responsavel FROM usuarios WHERE login = %s AND senha = %s", (u.strip(), s.strip()))
+                        user = cur.fetchone()
+                        if user:
+                            st.session_state.logado = True
+                            st.session_state.nome = user['nome']
+                            st.session_state.depto = user['departamento']
+                            st.session_state.cd_user = user['cd_responsavel']
+                            st.rerun()
+                        else:
+                            st.error("Usuário ou senha inválidos.")
+            except Exception as e:
+                st.error(f"Erro de conexão: {e}")
+
+# --- CONTEÚDO DO SISTEMA ---
+else:
+    st.sidebar.title("FrioRio Distribuidora")
+    st.sidebar.write(f"**Usuário:** {st.session_state.nome}")
+    st.sidebar.write(f"**Setor:** {st.session_state.depto}")
+    if st.session_state.cd_user:
+        st.sidebar.write(f"**Unidade:** {st.session_state.cd_user}")
+    if st.sidebar.button("Sair"):
+        st.session_state.logado = False
+        st.session_state.carrinho_compras = []
         st.rerun()
 
-    st.sidebar.markdown("---")
-    
-    depto = user['departamento']
-    opcoes_menu = []
-    
-    if depto in ['Compras', 'Admin']:
-        opcoes_menu.append("Compras - Nova Solicitação")
-    if depto in ['Planejamento', 'Admin']:
-        opcoes_menu.append("Planejamento - Aprovação")
-    if depto in ['Transportes', 'Admin']:
-        opcoes_menu.append("Transportes - Cotação de Frete")
-    if depto in ['CD', 'CD Origem', 'Admin']:
-        opcoes_menu.append("CD Origem - Agendamento de Coleta")
-    if depto in ['CD', 'CD Destino', 'Admin']:
-        opcoes_menu.append("CD Destino - Agendamento de Recebimento")
-    
-    opcoes_menu.append("Histórico Geral")
-
-    aba = st.sidebar.radio("Selecione a Etapa do Processo:", opcoes_menu)
-
-    # ----------------------------------------------------
-    # ABA 1: COMPRAS
-    # ----------------------------------------------------
-    if aba == "Compras - Nova Solicitação":
-        st.header("🛒 Compras - Solicitação de Transferência inter-CDs")
+    # =========================================================================
+    # MÓDULO DE COMPRAS 
+    # =========================================================================
+    if st.session_state.depto == "Compras":
+        st.header("📦 Módulo de Compras - Ordem de Carga Multi-Produtos")
+        tab_nova, tab_acompanhar = st.tabs(["🆕 Criar Ordem Multi-Itens", "🔍 Acompanhar e Corrigir"])
         
         try:
             with get_conn(CRED_PLAN) as conn_p:
-                df_base = pd.read_sql("SELECT cod_produto, descricao_produto AS descricao FROM estoque_master", conn_p)
-            df_base['display'] = df_base['cod_produto'].astype(str) + " - " + df_base['descricao'].astype(str)
+                df_base = pd.read_sql("SELECT cod_produto, descricao FROM estoque_master", conn_p)
+            df_base['display'] = df_base['cod_produto'].astype(str) + " - " + df_base['descricao']
+        except Exception as e:
+            st.error(f"Erro ao carregar estoque: {e}")
+            df_base = pd.DataFrame(columns=['cod_produto', 'descricao', 'display'])
+
+        with tab_nova:
+            st.subheader("1. Dados de Cabeçalho da Ordem")
+            col_orig, col_dest = st.columns(2)
+            lista_cds = ["01 - Serra", "03 - Blumenau", "06 - São Paulo"]
+            origem = col_orig.selectbox("CD Origem (Saindo de)", lista_cds, key="orig_multi")
+            destino = col_dest.selectbox("CD Destino (Indo para)", lista_cds, key="dest_multi")
             
-            with st.form("form_compras", clear_on_submit=True):
-                st.subheader("1. Dados da Transferência")
-                c1, c2 = st.columns(2)
-                with c1:
-                    cd_origem = st.selectbox("CD Origem (Expedição)", ["01 - Serra", "03 - Blumenau", "06 - São Paulo"])
-                with c2:
-                    cd_destino = st.selectbox("CD Destino (Recebimento)", ["01 - Serra", "03 - Blumenau", "06 - São Paulo"])
-                
-                data_limite = st.date_input("Data Limite para Chegada no Destino")
-                tipo_frete = st.radio("Tipo de Frete Solicitado", ["FOB (Nosso Frete)", "CIF (Fornecedor)"], horizontal=True)
-                
-                st.subheader("2. Adicionar Itens à Solicitação")
-                
-                if 'itens_temp' not in st.session_state:
-                    st.session_state.itens_temp = []
+            st.markdown("---")
+            col_manual, col_upload = st.columns([1, 1])
+            
+            with col_manual:
+                st.subheader("2a. Adicionar Item Manual")
+                with st.container(border=True):
+                    prod_sel = st.selectbox("Selecione o Produto", df_base['display'], key="prod_multi")
+                    col_qtd, col_un = st.columns(2)
+                    vol = col_qtd.number_input("Quantidade", min_value=1, value=1, key="vol_multi")
+                    u_med = col_un.selectbox("Unidade", ["UN", "PC", "CX", "KG", "MT", "PCT"], key="un_multi")
+                    ref = st.text_input("Referência Fabricante", key="ref_multi")
+                    
+                    if st.button("➕ Adicionar Produto à Lista", use_container_width=True):
+                        if origem == destino:
+                            st.error("O CD de Origem não pode ser idêntico ao CD de Destino.")
+                        else:
+                            cod_p = prod_sel.split(" - ")[0]
+                            desc_p = " - ".join(prod_sel.split(" - ")[1:])
+                            st.session_state.carrinho_compras.append({
+                                "cod_produto": cod_p, "descricao": desc_p, "unidade_medida": u_med,
+                                "referencia_fabricante": ref, "volume_solicitado": vol
+                            })
+                            st.toast("Item inserido na lista!")
 
-                prod_sel = st.selectbox("Buscar Produto (Código ou Descrição)", df_base['display'].tolist())
-                qtd_sel = st.number_input("Quantidade a Transferir", min_value=1, value=1)
+            with col_upload:
+                st.subheader("2b. Inclusão em Massa via Excel")
+                with st.container(border=True):
+                    st.markdown("O arquivo deve conter as colunas exatas: `Código do Produto`, `Descrição do Produto`, `Quantidade`, `Unidade de Medida`")
+                    arquivo_excel = st.file_uploader("Arraste ou selecione a planilha Excel", type=["xlsx", "xls"])
+                    
+                    if st.button("📥 Importar Itens da Planilha", use_container_width=True):
+                        if origem == destino:
+                            st.error("O CD de Origem não pode ser idêntico ao CD de Destino.")
+                        elif arquivo_excel is not None:
+                            try:
+                                df_importado = pd.read_excel(arquivo_excel)
+                                colunas_obrigatorias = ["Código do Produto", "Descrição do Produto", "Quantidade", "Unidade de Medida"]
+                                
+                                if not all(col in df_importado.columns for col in colunas_obrigatorias):
+                                    st.error(f"Erro no layout! O arquivo precisa ter as colunas: {', '.join(colunas_obrigatorias)}")
+                                else:
+                                    contador_lote = 0
+                                    for _, linha in df_importado.iterrows():
+                                        c_prod = str(linha["Código do Produto"]).strip()
+                                        d_prod = str(linha["Descrição do Produto"]).strip()
+                                        qtd_val = int(linha["Quantidade"])
+                                        u_val = str(linha["Unidade de Medida"]).strip()
+                                        
+                                        if c_prod and d_prod and qtd_val > 0:
+                                            st.session_state.carrinho_compras.append({
+                                                "cod_produto": c_prod, "descricao": d_prod, "unidade_medida": u_val if u_val else "UN",
+                                                "referencia_fabricante": "", "volume_solicitado": qtd_val
+                                            })
+                                            contador_lote += 1
+                                    st.success(f"Sucesso! {contador_lote} itens da planilha foram injetados no carrinho abaixo.")
+                                    st.rerun()
+                            except Exception as ex_excel:
+                                st.error(f"Erro ao processar o arquivo Excel: {ex_excel}")
+                        else:
+                            st.warning("Por favor, selecione um arquivo Excel válido antes de clicar.")
+
+            st.markdown("---")
+            if st.session_state.carrinho_compras:
+                st.markdown("### 🛒 Itens Prontos na Ordem Atual:")
+                df_car = pd.DataFrame(st.session_state.carrinho_compras)
+                st.dataframe(df_car, use_container_width=True)
                 
-                c_add, c_clr = st.columns([1, 5])
-                if c_add.form_submit_button("➕ Adicionar Item"):
-                    cod = prod_sel.split(" - ")[0]
-                    desc = " - ".join(prod_sel.split(" - ")[1:])
-                    st.session_state.itens_temp.append({
-                        "cod_produto": cod,
-                        "descricao_produto": desc,
-                        "quantidade": qtd_sel
-                    })
+                col_limp, col_gravar = st.columns(2)
+                if col_limp.button("🗑️ Limpar Toda a Lista", use_container_width=True):
+                    st.session_state.carrinho_compras = []
                     st.rerun()
-
-                if st.session_state.itens_temp:
-                    st.write("**Itens Selecionados:**")
-                    st.table(pd.DataFrame(st.session_state.itens_temp))
-                    if st.form_submit_button("❌ Limpar Lista de Itens"):
-                        st.session_state.itens_temp = []
-                        st.rerun()
-
-                st.subheader("3. Finalizar")
-                obs = st.text_area("Observações para o Planejamento / Transportes")
-                
-                btn_finalizar = st.form_submit_button("🚀 Enviar Solicitação para o Planejamento")
-                
-                if btn_finalizar:
-                    if cd_origem == cd_destino:
-                        st.error("O CD de Origem não pode ser igual ao CD de Destino!")
-                    elif not st.session_state.itens_temp:
-                        st.error("Adicione pelo menos um item à transferência!")
-                    else:
-                        try:
-                            with get_conn(CRED_OP) as conn_op:
-                                with conn_op.cursor() as cur:
+                    
+                if col_gravar.button("🚀 Confirmar e Enviar Ordem Unificada", type="primary", use_container_width=True):
+                    try:
+                        with get_conn(CRED_OP) as conn_op:
+                            with conn_op.cursor() as cur:
+                                ids_gerados = []
+                                rows_html = ""
+                                
+                                for item in st.session_state.carrinho_compras:
                                     cur.execute("""
                                         INSERT INTO solicitacoes_transferencia 
-                                        (cd_origem, cd_destino, data_limite_chegada, tipo_frete, solicitante, status, observacoes_compras)
-                                        VALUES (%s, %s, %s, %s, %s, 'AGUARDANDO APROVACAO PLANEJAMENTO', %s)
+                                        (cod_produto, descricao, unidade_medida, referencia_fabricante, cd_origem, cd_destino, volume_solicitado, status_atual, criado_por, data_criacao)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, 'Pendente Aprovação', %s, NOW())
                                         RETURNING id_solicitacao
-                                    """, (cd_origem, cd_destino, data_limite, tipo_frete, user['nome'], obs))
-                                    
-                                    id_sol = cur.fetchone()[0]
-                                    
-                                    for item in st.session_state.itens_temp:
-                                        cur.execute("""
-                                            INSERT INTO itens_solicitacao 
-                                            (id_solicitacao, cod_produto, descricao_produto, quantidade_solicitada)
-                                            VALUES (%s, %s, %s, %s)
-                                        """, (id_sol, item['cod_produto'], item['descricao_produto'], item['quantidade']))
+                                    """, (item['cod_produto'], item['descricao'], item['unidade_medida'], item['referencia_fabricante'], origem, destino, item['volume_solicitado'], st.session_state.nome))
+                                    id_item = cur.fetchone()[0]
+                                    ids_gerados.append(id_item)
+                                    rows_html += f"<tr><td>#{id_item}</td><td>{item['cod_produto']} - {item['descricao']}</td><td>{item['volume_solicitado']} {item['unidade_medida']}</td></tr>"
+                                conn_op.commit()
+                        
+                        st.success(f"Ordem de Carga cadastrada com sucesso! IDs: {ids_gerados}")
+                        tabela_html = f"<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%;'><tr style='background-color:#f2f2f2;'><th>ID Registro</th><th>Produto</th><th>Quantidade</th></tr>{rows_html}</table>"
+                        email_modulo_1_multi(ids_gerados[0], tabela_html, f"{origem} ➔ {destino}", len(ids_gerados))
+                        st.session_state.carrinho_compras = []
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Erro ao salvar ordem no banco: {e}")
+
+        with tab_acompanhar:
+            try:
+                with get_conn(CRED_OP) as conn_op:
+                    df_hist = pd.read_sql("SELECT * FROM solicitacoes_transferencia ORDER BY id_solicitacao DESC", conn_op)
+                
+                if df_hist.empty:
+                    st.info("Nenhum histórico encontrado.")
+                else:
+                    for idx, row in df_hist.iterrows():
+                        status = row['status_atual']
+                        id_sol = row['id_solicitacao']
+                        
+                        if status == 'Pendente Aprovação': badge = "🟡 Pendente"
+                        elif status == 'Aprovado': badge = "🟢 Aprovado"
+                        elif status == 'Recusado': badge = "🔴 Recusado"
+                        elif status == 'Cancelado': badge = "⚪ Cancelado/Excluído"
+                        else: badge = f"🔵 {status}"
+                        
+                        with st.expander(f"{badge} | ID #{id_sol} - {row['descricao']} ({row['cd_origem']} ➔ {row['cd_destino']})"):
+                            st.write(f"**Item:** {row['cod_produto']} | **Quantidade:** {row['volume_solicitado']} {row['unidade_medida']}")
+                            if row['justificativa_compras']:
+                                st.info(f"💬 Última Justificativa de Compras: {row['justificativa_compras']}")
+                                
+                            if status == 'Recusado':
+                                st.error(f"❌ Motivo do Planejamento: {row['justificativa_recusa']}")
+                                col_form_edit, col_btn_del = st.columns([3, 1])
+                                
+                                with col_form_edit:
+                                    with st.form(f"form_revisar_{id_sol}"):
+                                        n_qtd = st.number_input("Nova Quantidade", min_value=1, value=int(row['volume_solicitado']), key=f"nqtd_{id_sol}")
+                                        n_just = st.text_input("Justificativa da Correção", value="", key=f"njust_{id_sol}")
                                         
-                                    conn_op.commit()
+                                        if st.form_submit_button("🔄 Corrigir e Notificar Planejamento"):
+                                            if n_just.strip() == "":
+                                                st.error("Insira uma justificativa técnica para a revisão.")
+                                            else:
+                                                with get_conn(CRED_OP) as conn_re:
+                                                    with conn_re.cursor() as cur:
+                                                        cur.execute("""
+                                                            UPDATE solicitacoes_transferencia 
+                                                            SET status_atual = 'Pendente Aprovação', volume_solicitado = %s,
+                                                                justificativa_compras = %s, justificativa_recusa = NULL 
+                                                            WHERE id_solicitacao = %s
+                                                        """, (n_qtd, n_just.strip(), id_sol))
+                                                        conn_re.commit()
+                                                st.success("Item devolvido para análise!")
+                                                email_item_revisado_planejamento(id_sol, row['descricao'], f"{row['cd_origem']} -> {row['cd_destino']}", n_qtd, n_just.strip())
+                                                st.rerun()
+                                                
+                                with col_btn_del:
+                                    st.markdown("<br>", unsafe_allow_html=True)
+                                    if st.button("🗑️ Excluir Produto", key=f"del_prod_{id_sol}", type="primary", use_container_width=True):
+                                        with get_conn(CRED_OP) as conn_del:
+                                            with conn_del.cursor() as cur:
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Cancelado' WHERE id_solicitacao = %s", (id_sol,))
+                                                conn_del.commit()
+                                        st.toast(f"Produto #{id_sol} excluído da carga!")
+                                        st.rerun()
+            except Exception as e:
+                st.error(f"Erro ao monitorar itens: {e}")
 
-                            destinatarios_email = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS]
-                            corpo_email = f"""
-                            <h3>Nova Solicitação de Transferência Criada!</h3>
-                            <p><b>ID da Solicitação:</b> #{id_sol}</p>
-                            <p><b>Solicitante:</b> {user['nome']}</p>
-                            <p><b>Origem:</b> {cd_origem} ➔ <b>Destino:</b> {cd_destino}</p>
-                            <p><b>Data Limite:</b> {data_limite.strftime('%d/%m/%Y')}</p>
-                            <p><b>Tipo de Frete:</b> {tipo_frete}</p>
-                            <p><b>Status Atual:</b> AGUARDANDO APROVAÇÃO PLANEJAMENTO</p>
-                            <br>
-                            <p>Acesse o sistema para analisar e aprovar esta solicitação.</p>
-                            """
-                            enviar_email(destinatarios_email, f"🚀 Nova Solicitação de Transferência inter-CDs #{id_sol}", corpo_email)
-
-                            st.success(f"Solicitação #{id_sol} enviada com sucesso ao Planejamento!")
-                            st.session_state.itens_temp = []
-                        except Exception as e:
-                            st.error(f"Erro ao salvar no banco de dados: {e}")
-
-        except Exception as e:
-            st.error(f"Erro ao carregar dados do banco: {e}")
-
-    # ----------------------------------------------------
-    # ABA 2: PLANEJAMENTO
-    # ----------------------------------------------------
-    elif aba == "Planejamento - Aprovação":
-        st.header("📊 Planejamento - Aprovação de Transferências")
+    # =========================================================================
+    # MÓDULO DE PLANEJAMENTO
+    # =========================================================================
+    elif st.session_state.depto == "Planejamento":
+        st.header("📊 Módulo de Planejamento - Avaliação de Demandas")
+        tab_aprov, tab_agend = st.tabs(["📋 Aprovar Linhas de Solicitação (Lote)", "📅 Agendar Janelas de Doca (Consolidado)"])
         
-        try:
-            with get_conn(CRED_OP) as conn_op:
-                df_sol = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status = 'AGUARDANDO APROVACAO PLANEJAMENTO' ORDER BY id_solicitacao DESC", conn_op)
-            
-            if df_sol.empty:
-                st.info("Não há solicitações pendentes de aprovação pelo Planejamento no momento.")
-            else:
-                for _, row in df_sol.iterrows():
-                    with st.expander(f"Solicitação #{row['id_solicitacao']} - De: {row['cd_origem']} Para: {row['cd_destino']} (Limite: {row['data_limite_chegada']})"):
-                        st.write(f"**Solicitante:** {row['solicitante']} | **Tipo de Frete Solicitado:** {row['tipo_frete']}")
-                        st.write(f"**Obs Compras:** {row['observacoes_compras']}")
+        with tab_aprov:
+            try:
+                with get_conn(CRED_OP) as conn_op:
+                    df_sol = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status_atual = 'Pendente Aprovação' ORDER BY id_solicitacao ASC", conn_op)
+                
+                if df_sol.empty:
+                    st.info("Nenhum item pendente de aprovação.")
+                else:
+                    st.subheader("Avaliação Individual de Itens via Checkbox")
+                    st.markdown("Marque **Aprovar** ou **Reprovar** para cada linha comercial e submeta o lote unificado ao final.")
+                    
+                    with st.form("form_planejamento_lote_coletivo"):
+                        lista_respostas_planejamento = []
                         
-                        with get_conn(CRED_OP) as conn_i:
-                            df_itens = pd.read_sql(f"SELECT cod_produto, descricao_produto, quantidade_solicitada FROM itens_solicitacao WHERE id_solicitacao = {row['id_solicitacao']}", conn_i)
-                        st.dataframe(df_itens, use_container_width=True)
-                        
-                        st.markdown("---")
-                        c_ap, c_rec = st.columns(2)
-                        
-                        with c_ap:
-                            st.subheader("Aprovar Solicitação")
-                            tipo_frete_def = st.radio(f"Confirmar Tipo de Frete (ID {row['id_solicitacao']})", ["FOB (Nosso Frete)", "CIF (Fornecedor)"], index=0 if row['tipo_frete']=="FOB (Nosso Frete)" else 1, key=f"tf_{row['id_solicitacao']}")
-                            obs_plan = st.text_area(f"Observações do Planejamento (ID {row['id_solicitacao']})", key=f"obs_p_{row['id_solicitacao']}")
+                        for idx, r in df_sol.iterrows():
+                            id_sol = r['id_solicitacao']
                             
-                            if st.button(f"✅ Aprovar #{row['id_solicitacao']}", key=f"btn_ap_{row['id_solicitacao']}"):
-                                try:
-                                    novo_status = 'AGUARDANDO COTACAO FRETE' if tipo_frete_def == 'FOB (Nosso Frete)' else 'AGUARDANDO AGENDAMENTO ORIGEM'
+                            with st.container(border=True):
+                                st.markdown(f"**Item #{id_sol}** — {r['cod_produto']} - {r['descricao']}")
+                                st.write(f"**Rota:** {r['cd_origem']} ➔ {r['cd_destino']} | **Qtd Solicitada:** {r['volume_solicitado']} {r['unidade_medida']} | **Solicitante:** {r['criado_por']}")
+                                if r['justificativa_compras']:
+                                    st.warning(f"⚠️ **Observação de Compras:** {r['justificativa_compras']}")
+                                
+                                col_aprov, col_reprov, col_motivo = st.columns([1.5, 1.5, 5])
+                                
+                                chk_aprovado = col_aprov.checkbox("🟢 Aprovar", key=f"chk_ap_{id_sol}")
+                                chk_reprovado = col_reprov.checkbox("🔴 Reprovar", key=f"chk_rp_{id_sol}")
+                                input_motivo = col_motivo.text_input("Se reprovar, informe o motivo", value="", key=f"txt_mot_{id_sol}")
+                                
+                                lista_respostas_planejamento.append({
+                                    "id_sol": id_sol, "aprovado": chk_aprovado, "reprovado": chk_reprovado, "motivo": input_motivo, "row": r
+                                })
+                        
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        btn_submeter_tudo = st.form_submit_button("💾 Finalizar e Submeter Decisões do Lote", type="primary", use_container_width=True)
+                        
+                        if btn_submeter_tudo:
+                            erros_validacao = False
+                            lote_update_aprovados = []
+                            lote_update_recusados = []
+                            
+                            for item in lista_respostas_planejamento:
+                                if item['aprovado'] and item['reprovado']:
+                                    st.error(f"Erro no Item #{item['id_sol']}: Não selecione 'Aprovar' e 'Reprovar' ao mesmo tempo.")
+                                    erros_validacao = True
+                                if item['reprovado'] and item['motivo'].strip() == "":
+                                    st.error(f"Erro no Item #{item['id_sol']}: Se marcar como reprovado, o preenchimento do motivo é obrigatório.")
+                                    erros_validacao = True
                                     
+                                if not erros_validacao:
+                                    if item['aprovado']:
+                                        lote_update_aprovados.append(item)
+                                    elif item['reprovado']:
+                                        lote_update_recusados.append(item)
+                                        
+                            if not erros_validacao:
+                                total_processados = len(lote_update_aprovados) + len(lote_update_recusados)
+                                
+                                if total_processados == 0:
+                                    st.error("Nenhuma decisão de aprovação ou reprovação foi selecionada no lote.")
+                                else:
                                     with get_conn(CRED_OP) as conn_processa:
                                         with conn_processa.cursor() as cur:
-                                            cur.execute("""
-                                                UPDATE solicitacoes_transferencia 
-                                                SET status = %s, tipo_frete = %s, observacoes_planejamento = %s, aprovador_planejamento = %s
-                                                WHERE id_solicitacao = %s
-                                            """, (novo_status, tipo_frete_def, obs_plan, user['nome'], row['id_solicitacao']))
-                                            conn_processa.commit()
+                                            for item in lote_update_aprovados:
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Aprovado', data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s", (item['id_sol'],))
+                                            for item in lote_update_recusados:
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Recusado', justificativa_recusa = %s, data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s", (item['motivo'].strip(), item['id_sol']))
+                                        conn_processa.commit()
                                     
-                                    destinatarios_email = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS]
-                                    if tipo_frete_def == 'FOB (Nosso Frete)':
-                                        destinatarios_email.append(EMAIL_TRANSPORTES)
-                                    else:
-                                        destinatarios_email.append(MAP_EMAILS_CDS.get(row['cd_origem']))
-
-                                    corpo_email = f"""
-                                    <h3>Solicitação #{row['id_solicitacao']} APROVADA pelo Planejamento!</h3>
-                                    <p><b>Aprovado por:</b> {user['nome']}</p>
-                                    <p><b>Tipo de Frete Definido:</b> {tipo_frete_def}</p>
-                                    <p><b>Novo Status:</b> {novo_status}</p>
-                                    <p><b>Observações:</b> {obs_plan}</p>
-                                    """
-                                    enviar_email(destinatarios_email, f"✅ Solicitação #{row['id_solicitacao']} Aprovada pelo Planejamento", corpo_email)
-
-                                    st.success(f"Solicitação #{row['id_solicitacao']} Aprovada!")
+                                    if lote_update_aprovados:
+                                        html_ap = "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%;'><tr style='background-color:#e8f5e9;'><th>ID</th><th>Produto</th><th>Rota</th><th>Quantidade</th></tr>"
+                                        for item in lote_update_aprovados:
+                                            r = item['row']
+                                            html_ap += f"<tr><td>#{item['id_sol']}</td><td>{r['cod_produto']} - {r['descricao']}</td><td>{r['cd_origem']} ➔ {r['cd_destino']}</td><td>{r['volume_solicitado']} {r['unidade_medida']}</td></tr>"
+                                        html_ap += "</table>"
+                                        email_lote_aprovados_planejamento(html_ap, len(lote_update_aprovados))
+                                        
+                                    if lote_update_recusados:
+                                        html_rp = "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%;'><tr style='background-color:#ffebee;'><th>ID</th><th>Produto</th><th>Rota</th><th>Quantidade</th><th>Motivo da Recusa</th></tr>"
+                                        for item in lote_update_recusados:
+                                            r = item['row']
+                                            html_rp += f"<tr><td>#{item['id_sol']}</td><td>{r['cod_produto']} - {r['descricao']}</td><td>{r['cd_origem']} ➔ {r['cd_destino']}</td><td>{r['volume_solicitado']} {r['unidade_medida']}</td><td style='color:#d32f2f;'><b>{item['motivo']}</b></td></tr>"
+                                        html_rp += "</table>"
+                                        email_lote_recusados_planejamento(html_rp, len(lote_update_recusados))
+                                        
+                                    st.success(f"Lote processado com sucesso! {len(lote_update_aprovados)} itens aprovados e {len(lote_update_recusados)} itens recusados.")
                                     st.rerun()
-                                except Exception as e:
-                                    st.error(f"Erro ao aprovar: {e}")
+            except Exception as e:
+                st.error(f"Erro no fluxo de aprovação do planejamento: {e}")
 
-                        with c_rec:
-                            st.subheader("Recusar Solicitação")
-                            motivo_rec = st.text_area(f"Motivo da Recusa (ID {row['id_solicitacao']})", key=f"mot_{row['id_solicitacao']}")
-                            if st.button(f"❌ Recusar #{row['id_solicitacao']}", key=f"btn_rec_{row['id_solicitacao']}"):
-                                if not motivo_rec:
-                                    st.error("Informe o motivo da recusa.")
-                                else:
-                                    try:
-                                        with get_conn(CRED_OP) as conn_processa:
-                                            with conn_processa.cursor() as cur:
+        with tab_agend:
+            try:
+                with get_conn(CRED_OP) as conn_op:
+                    df_ag = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status_atual = 'Em Trânsito'", conn_op)
+                
+                if df_ag.empty:
+                    st.info("Nenhuma carga aguardando agendamento logístico de doca.")
+                else:
+                    st.subheader("Controle de Janelas por Lote Consolidado")
+                    df_ag['data_formatada'] = pd.to_datetime(df_ag['data_criacao']).dt.date
+                    df_ag['chave_agrupamento'] = df_ag['cd_origem'] + " ➔ " + df_ag['cd_destino'] + " (" + df_ag['data_formatada'].astype(str) + ")"
+                    
+                    grupos_agendamento = df_ag['chave_agrupamento'].unique()
+                    
+                    for idx_g, nome_grupo in enumerate(grupos_agendamento):
+                        df_sub_ag = df_ag[df_ag['chave_agrupamento'] == nome_grupo]
+                        
+                        transportadora_vinculada = df_sub_ag['transportadora'].iloc[0]
+                        data_prevista_vinculada = pd.to_datetime(df_sub_ag['data_prevista_entrega'].iloc[0]).strftime('%d/%m/%Y')
+                        cd_destino_carga = df_sub_ag['cd_destino'].iloc[0]
+                        
+                        total_volumes = int(df_sub_ag['qtd_volumes_separado'].sum())
+                        total_peso = float(df_sub_ag['peso_total_bruto_kg'].sum())
+                        total_cubagem = float(df_sub_ag['tamanho_cubico_m3'].sum())
+                        lista_ids_grupo = df_sub_ag['id_solicitacao'].tolist()
+                        
+                        with st.container(border=True):
+                            st.markdown(f"### 📅 Agendamento de Doca: {nome_grupo}")
+                            st.markdown(f"**Transportadora:** {transportadora_vinculada} | **Previsão:** {data_prevista_vinculada}")
+                            
+                            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+                            col_m1.metric("Total Volumes", f"{total_volumes} cx")
+                            col_m2.metric("Peso Bruto", f"{total_peso:,.1f} KG")
+                            col_m3.metric("Cubagem", f"{total_cubagem:.3f} m³")
+                            col_m4.metric("Itens no Lote", f"{len(df_sub_ag)} prod.")
+                            
+                            with st.form(f"form_agenda_grupo_{idx_g}"):
+                                col_d, col_h = st.columns(2)
+                                dt_ag = col_d.date_input("Data para Descarregamento", key=f"dag_g_{idx_g}")
+                                hr_ag = col_h.text_input("Horário da Janela (Ex: 08:30)", key=f"hag_g_{idx_g}")
+                                
+                                if st.form_submit_button("🔒 Confirmar Janela de Entrega para o Lote", use_container_width=True):
+                                    if hr_ag.strip() == "":
+                                        st.error("Informe a hora exata da janela de doca.")
+                                    else:
+                                        with get_conn(CRED_OP) as conn_up:
+                                            with conn_up.cursor() as cur:
                                                 cur.execute("""
                                                     UPDATE solicitacoes_transferencia 
-                                                    SET status = 'RECUSADO PLANEJAMENTO', observacoes_planejamento = %s, aprovador_planejamento = %s
-                                                    WHERE id_solicitacao = %s
-                                                """, (motivo_rec, user['nome'], row['id_solicitacao']))
-                                                conn_processa.commit()
-
-                                        destinatarios_email = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS]
-                                        corpo_email = f"""
-                                        <h3>Solicitação #{row['id_solicitacao']} RECUSADA pelo Planejamento!</h3>
-                                        <p><b>Analisado por:</b> {user['nome']}</p>
-                                        <p><b>Motivo da Recusa:</b> {motivo_rec}</p>
-                                        """
-                                        enviar_email(destinatarios_email, f"❌ Solicitação #{row['id_solicitacao']} Recusada", corpo_email)
-
-                                        st.warning(f"Solicitação #{row['id_solicitacao']} Recusada.")
+                                                    SET data_agendada_final = %s, hora_agendada_final = %s, status_atual = 'Agendado', data_ultima_atualizacao = NOW()
+                                                    WHERE id_solicitacao = ANY(%s)
+                                                """, (dt_ag, hr_ag.strip(), lista_ids_grupo))
+                                            conn_up.commit()
+                                                
+                                        st.success(f"Janela de doca salva para o lote.")
+                                        email_modulo_5_resumido(nome_grupo, cd_destino_carga, dt_ag, hr_ag.strip(), len(lista_ids_grupo))
                                         st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Erro ao recusar: {e}")
+            except Exception as e:
+                st.error(f"Erro no agendamento: {e}")
 
-        except Exception as e:
-            st.error(f"Erro ao carregar dados: {e}")
-
-    # ----------------------------------------------------
-    # ABA 3: TRANSPORTES
-    # ----------------------------------------------------
-    elif aba == "Transportes - Cotação de Frete":
-        st.header("🚚 Transportes - Cotação e Inclusão de Fretes")
+    # =========================================================================
+    # MÓDULO DE TRANSPORTES
+    # =========================================================================
+    elif st.session_state.depto == "Transportes":
+        st.header("🚛 Módulo de Carga e Contratação de Fretes")
         try:
             with get_conn(CRED_OP) as conn_op:
-                df_tr = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status = 'AGUARDANDO COTACAO FRETE' ORDER BY id_solicitacao DESC", conn_op)
+                df_tr = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status_atual = 'Pronto para Transporte'", conn_op)
             
             if df_tr.empty:
-                st.info("Não há solicitações pendentes de cotação de frete no momento.")
+                st.info("Sem cargas liberadas para transporte no momento.")
             else:
-                for _, row in df_tr.iterrows():
-                    with st.expander(f"Solicitação #{row['id_solicitacao']} - {row['cd_origem']} ➔ {row['cd_destino']} (Limite: {row['data_limite_chegada']})"):
-                        st.write(f"**Solicitante:** {row['solicitante']} | **Obs Planejamento:** {row['observacoes_planejamento']}")
-                        
-                        with get_conn(CRED_OP) as conn_i:
-                            df_itens = pd.read_sql(f"SELECT cod_produto, descricao_produto, quantidade_solicitada FROM itens_solicitacao WHERE id_solicitacao = {row['id_solicitacao']}", conn_i)
-                        st.dataframe(df_itens, use_container_width=True)
-                        
-                        with st.form(f"form_tr_{row['id_solicitacao']}"):
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                transp = st.text_input("Transportadora Contratada")
-                                valor_f = st.number_input("Valor do Frete (R$)", min_value=0.0, format="%.2f")
-                            with c2:
-                                data_col_prev = st.date_input("Previsão de Coleta na Origem")
-                                data_ent_prev = st.date_input("Previsão de Entrega no Destino")
-                            
-                            obs_tr = st.text_area("Observações do Transportes")
-                            btn_salvar_tr = st.form_submit_button("✅ Finalizar Cotação e Enviar p/ CD Origem")
-                            
-                            if btn_salvar_tr:
-                                if not transp:
-                                    st.error("Informe a transportadora.")
-                                else:
-                                    try:
-                                        with get_conn(CRED_OP) as conn_up:
-                                            with conn_up.cursor() as cur:
-                                                cur.execute("""
-                                                    UPDATE solicitacoes_transferencia 
-                                                    SET status = 'AGUARDANDO AGENDAMENTO ORIGEM', transportadora = %s, valor_frete = %s,
-                                                        data_coleta_prevista = %s, data_entrega_prevista = %s, observacoes_transportes = %s
-                                                    WHERE id_solicitacao = %s
-                                                """, (transp, valor_f, data_col_prev, data_ent_prev, obs_tr, row['id_solicitacao']))
-                                                conn_up.commit()
-
-                                        destinatarios_email = [
-                                            EMAIL_PLANEJAMENTO, 
-                                            EMAIL_TRANSPORTES, 
-                                            MAP_EMAILS_CDS.get(row['cd_origem'])
-                                        ]
-                                        corpo_email = f"""
-                                        <h3>Cotação de Frete Concluída - Solicitação #{row['id_solicitacao']}</h3>
-                                        <p><b>Transportadora:</b> {transp}</p>
-                                        <p><b>Valor do Frete:</b> R$ {valor_f:.2f}</p>
-                                        <p><b>Prev. Coleta Origem:</b> {data_col_prev.strftime('%d/%m/%Y')}</p>
-                                        <p><b>Prev. Entrega Destino:</b> {data_ent_prev.strftime('%d/%m/%Y')}</p>
-                                        <p><b>Novo Status:</b> AGUARDANDO AGENDAMENTO ORIGEM</p>
-                                        """
-                                        enviar_email(destinatarios_email, f"🚚 Frete Cotado - Solicitação #{row['id_solicitacao']}", corpo_email)
-
-                                        st.success("Dados de frete salvos e enviados ao CD Origem!")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Erro ao salvar: {e}")
-
-        except Exception as e:
-            st.error(f"Erro ao carregar dados: {e}")
-
-    # ----------------------------------------------------
-    # ABA 4: CD ORIGEM
-    # ----------------------------------------------------
-    elif aba == "CD Origem - Agendamento de Coleta":
-        st.header("📦 CD Origem - Agendamento de Coleta / Separação")
-        try:
-            with get_conn(CRED_OP) as conn_op:
-                query = """
-                    SELECT id_solicitacao, cd_origem, cd_destino, data_limite_chegada, tipo_frete,
-                           transportadora, data_coleta_prevista, observacoes_transportes
-                    FROM solicitacoes_transferencia 
-                    WHERE status = 'AGUARDANDO AGENDAMENTO ORIGEM'
-                """
-                if user['departamento'] == 'CD' and user['cd_responsavel']:
-                    query += f" AND cd_origem = '{user['cd_responsavel']}'"
-                query += " ORDER BY id_solicitacao DESC"
+                st.subheader("Fila de Expedição Consolidada")
+                df_tr['data_formatada'] = pd.to_datetime(df_tr['data_criacao']).dt.date
+                df_tr['chave_agrupamento'] = df_tr['cd_origem'] + " ➔ " + df_tr['cd_destino'] + " (" + df_tr['data_formatada'].astype(str) + ")"
                 
-                df_cd_o = pd.read_sql(query, conn_op)
-            
-            if df_cd_o.empty:
-                st.info("Não há coletas pendentes de agendamento para o seu CD no momento.")
-            else:
-                for _, row in df_cd_o.iterrows():
-                    with st.expander(f"Solicitação #{row['id_solicitacao']} - CD Origem: {row['cd_origem']} ➔ Destino: {row['cd_destino']}"):
-                        st.write(f"**Transportadora:** {row['transportadora']} | **Data Prevista Coleta:** {row['data_coleta_prevista']}")
-                        
-                        with get_conn(CRED_OP) as conn_i:
-                            df_itens = pd.read_sql(f"SELECT cod_produto, descricao_produto, quantidade_solicitada FROM itens_solicitacao WHERE id_solicitacao = {row['id_solicitacao']}", conn_i)
-                        st.dataframe(df_itens, use_container_width=True)
-                        
-                        with st.form(f"form_cdo_{row['id_solicitacao']}"):
-                            c1, c2 = st.columns(2)
-                            with c1:
-                                data_col_real = st.date_input("Data Confirmada da Coleta/Saída", key=f"dt_c_{row['id_solicitacao']}")
-                                num_nf = st.text_input("Número da Nota Fiscal (NF-e)", key=f"nf_{row['id_solicitacao']}")
-                            with c2:
-                                obs_cdo = st.text_area("Observações do CD Origem", key=f"obs_cdo_{row['id_solicitacao']}")
-                            
-                            btn_conf_col = st.form_submit_button("📦 Confirmar Separação/Coleta e Liberar para Destino")
-                            
-                            if btn_conf_col:
-                                if not num_nf:
-                                    st.error("Informe o número da Nota Fiscal.")
-                                else:
-                                    try:
-                                        with get_conn(CRED_OP) as conn_up:
-                                            with conn_up.cursor() as cur:
-                                                cur.execute("""
-                                                    UPDATE solicitacoes_transferencia 
-                                                    SET status = 'EM TRÂNSITO / AGUARDANDO DESTINO', data_coleta_real = %s,
-                                                        numero_nota_fiscal = %s, observacoes_cd_origem = %s
-                                                    WHERE id_solicitacao = %s
-                                                """, (data_col_real, num_nf, obs_cdo, row['id_solicitacao']))
-                                                conn_up.commit()
-
-                                        destinatarios_email = [
-                                            EMAIL_PLANEJAMENTO, 
-                                            EMAIL_TRANSPORTES, 
-                                            MAP_EMAILS_CDS.get(row['cd_destino'])
-                                        ]
-                                        corpo_email = f"""
-                                        <h3>Carga Expedida - Solicitação #{row['id_solicitacao']}</h3>
-                                        <p><b>CD Origem:</b> {row['cd_origem']}</p>
-                                        <p><b>CD Destino:</b> {row['cd_destino']}</p>
-                                        <p><b>Nota Fiscal:</b> {num_nf}</p>
-                                        <p><b>Data de Saída:</b> {data_col_real.strftime('%d/%m/%Y')}</p>
-                                        <p><b>Novo Status:</b> EM TRÂNSITO / AGUARDANDO DESTINO</p>
-                                        """
-                                        enviar_email(destinatarios_email, f"📦 Carga em Trânsito (NF {num_nf}) - Solicitação #{row['id_solicitacao']}", corpo_email)
-
-                                        st.success("Coleta e expedição confirmadas!")
-                                        st.rerun()
-                                    except Exception as e:
-                                        st.error(f"Erro ao atualizar: {e}")
-
-        except Exception as e:
-            st.error(f"Erro ao carregar dados: {e}")
-
-    # ----------------------------------------------------
-    # ABA 5: CD DESTINO
-    # ----------------------------------------------------
-    elif aba == "CD Destino - Agendamento de Recebimento":
-        st.header("📥 CD Destino - Confirmação de Recebimento")
-        try:
-            with get_conn(CRED_OP) as conn_op:
-                query = """
-                    SELECT id_solicitacao, cd_origem, cd_destino, transportadora, numero_nota_fiscal, data_coleta_real
-                    FROM solicitacoes_transferencia 
-                    WHERE status = 'EM TRÂNSITO / AGUARDANDO DESTINO'
-                """
-                if user['departamento'] == 'CD' and user['cd_responsavel']:
-                    query += f" AND cd_destino = '{user['cd_responsavel']}'"
-                query += " ORDER BY id_solicitacao DESC"
+                grupos_carga = df_tr['chave_agrupamento'].unique()
                 
-                df_cd_d = pd.read_sql(query, conn_op)
-            
-            if df_cd_d.empty:
-                st.info("Não há cargas em trânsito para o seu CD no momento.")
-            else:
-                for _, row in df_cd_d.iterrows():
-                    with st.expander(f"Solicitação #{row['id_solicitacao']} - NF: {row['numero_nota_fiscal']} (Origem: {row['cd_origem']})"):
-                        st.write(f"**Transportadora:** {row['transportadora']} | **Data Saída Origem:** {row['data_coleta_real']}")
+                for idx_g, nome_grupo in enumerate(grupos_carga):
+                    df_sub_grupo = df_tr[df_tr['chave_agrupamento'] == nome_grupo]
+                    
+                    total_volumes = int(df_sub_grupo['qtd_volumes_separado'].sum())
+                    total_peso_bruto = float(df_sub_grupo['peso_total_bruto_kg'].sum())
+                    total_peso_liquido = float(df_sub_grupo['peso_total_liquido_kg'].sum())
+                    total_cubagem = float(df_sub_grupo['tamanho_cubico_m3'].sum())
+                    total_palets = int(df_sub_grupo['qtd_unidades_por_palet'].sum())
+                    lista_ids_grupo = df_sub_grupo['id_solicitacao'].tolist()
+                    
+                    with st.container(border=True):
+                        st.markdown(f"### 📦 Solicitação de Carga: {nome_grupo}")
                         
-                        with get_conn(CRED_OP) as conn_i:
-                            df_itens = pd.read_sql(f"SELECT id_item, cod_produto, descricao_produto, quantidade_solicitada FROM itens_solicitacao WHERE id_solicitacao = {row['id_solicitacao']}", conn_i)
+                        c1, c2, c3, c4, c5 = st.columns(5)
+                        c1.metric("Soma Volumes Real", f"{total_volumes} cx")
+                        c2.metric("Soma Peso Bruto", f"{total_peso_bruto:,.1f} KG")
+                        c3.metric("Soma Peso Líquido", f"{total_peso_liquido:,.1f} KG")
+                        c4.metric("Cubagem Total", f"{total_cubagem:.3f} m³")
+                        c5.metric("Total Palets", f"{total_palets} PLT")
                         
-                        with st.form(f"form_cdd_{row['id_solicitacao']}"):
-                            st.subheader("Conferência de Recebimento")
-                            data_rec = st.date_input("Data do Recebimento Real", key=f"dt_r_{row['id_solicitacao']}")
+                        with st.form(f"form_despacho_grupo_{idx_g}"):
+                            col_t, col_d = st.columns(2)
+                            transp = col_t.text_input("Nome da Transportadora / Motorista", key=f"tname_g_{idx_g}")
+                            dt_p = col_d.date_input("Previsão de Chegada no Destino", key=f"dtp_g_{idx_g}")
                             
-                            st.write("**Confira as quantidades recebidas:**")
-                            qtds_recebidas = {}
-                            for _, item in df_itens.iterrows():
-                                qtds_recebidas[item['id_item']] = st.number_input(
-                                    f"Qtd Recebida - {item['cod_produto']} ({item['descricao_produto']}) [Solicitado: {item['quantidade_solicitada']}]",
-                                    min_value=0,
-                                    value=int(item['quantidade_solicitada']),
-                                    key=f"item_rec_{item['id_item']}"
-                                )
-                            
-                            obs_cdd = st.text_area("Observações/Avarias/Divergências no Recebimento", key=f"obs_cdd_{row['id_solicitacao']}")
-                            btn_finalizar_rec = st.form_submit_button("🎉 Finalizar Recebimento e Concluir Processo")
-                            
-                            if btn_finalizar_rec:
-                                try:
-                                    with get_conn(CRED_OP) as conn_final:
-                                        with conn_final.cursor() as cur:
-                                            for id_item_val, qtd_r in qtds_recebidas.items():
-                                                cur.execute("UPDATE itens_solicitacao SET quantidade_recebida = %s WHERE id_item = %s", (qtd_r, id_item_val))
-                                            
+                            if st.form_submit_button("🚀 Despachar Carga Consolidada (Lote)", type="primary", use_container_width=True):
+                                if transp.strip() == "":
+                                    st.error("Por favor, preencha o nome da transportadora.")
+                                else:
+                                    with get_conn(CRED_OP) as conn_up:
+                                        with conn_up.cursor() as cur:
                                             cur.execute("""
                                                 UPDATE solicitacoes_transferencia 
-                                                SET status = 'CONCLUIDO', data_entrega_real = %s, observacoes_cd_destino = %s
-                                                WHERE id_solicitacao = %s
-                                            """, (data_rec, obs_cdd, row['id_solicitacao']))
-                                            conn_final.commit()
-
-                                    destinatarios_email = [
-                                        EMAIL_PLANEJAMENTO, 
-                                        EMAIL_COMPRAS, 
-                                        EMAIL_TRANSPORTES, 
-                                        MAP_EMAILS_CDS.get(row['cd_origem']),
-                                        MAP_EMAILS_CDS.get(row['cd_destino'])
-                                    ]
-                                    corpo_email = f"""
-                                    <h3>🎉 Transferência Concluída - Solicitação #{row['id_solicitacao']}</h3>
-                                    <p><b>CD Destino:</b> {row['cd_destino']}</p>
-                                    <p><b>Nota Fiscal:</b> {row['numero_nota_fiscal']}</p>
-                                    <p><b>Data Recebimento:</b> {data_rec.strftime('%d/%m/%Y')}</p>
-                                    <p><b>Observações Recebimento:</b> {obs_cdd}</p>
-                                    <p><b>Status Final:</b> CONCLUÍDO</p>
-                                    """
-                                    enviar_email(destinatarios_email, f"🎉 Transferência Concluída - Solicitação #{row['id_solicitacao']}", corpo_email)
-
-                                    st.success("Recebimento concluído com sucesso!")
+                                                SET data_prevista_entrega = %s, transportadora = %s, status_atual = 'Em Trânsito', data_ultima_atualizacao = NOW()
+                                                WHERE id_solicitacao = ANY(%s)
+                                            """, (dt_p, transp.strip(), lista_ids_grupo))
+                                            conn_up.commit()
+                                    
+                                    st.success(f"Carga despachada.")
+                                    email_modulo_4_resumido(nome_grupo, transp.strip(), dt_p, len(lista_ids_grupo))
                                     st.rerun()
-                                except Exception as e:
-                                    st.error(f"Erro ao finalizar: {e}")
-
         except Exception as e:
-            st.error(f"Erro ao carregar dados: {e}")
+            st.error(f"Erro no módulo de transportes resumido: {e}")
 
-    # ----------------------------------------------------
-    # ABA 6: HISTÓRICO GERAL
-    # ----------------------------------------------------
-    elif aba == "Histórico Geral":
-        st.header("📋 Histórico Geral de Solicitações")
-        try:
-            with get_conn(CRED_OP) as conn_op:
-                df_hist = pd.read_sql("SELECT * FROM solicitacoes_transferencia ORDER BY id_solicitacao DESC", conn_op)
-            
-            if df_hist.empty:
-                st.info("Nenhuma solicitação encontrada.")
-            else:
-                st.dataframe(df_hist, use_container_width=True)
+    # =========================================================================
+    # GESTÃO DE CD (ORIGEM EM LOTE + DESTINO CONSOLIDADO COM CONFERÊNCIA DE SUCESSO)
+    # =========================================================================
+    elif st.session_state.depto == "CD":
+        cd_logado = st.session_state.cd_user
+        st.header(f"🏢 Painel Operacional de Movimentação - CD {cd_logado}")
+        tab_origem, tab_destino = st.tabs(["📤 Cargas Saindo (Origem)", "📥 Cargas Chegando (Destino Consolidado)"])
+        
+        with tab_origem:
+            try:
+                with get_conn(CRED_OP) as conn_op:
+                    query = """
+                        SELECT id_solicitacao, cod_produto, descricao, volume_solicitado, unidade_medida, cd_origem, cd_destino, data_criacao
+                        FROM solicitacoes_transferencia 
+                        WHERE status_atual = 'Aprovado' AND separado = FALSE AND cd_origem = %s
+                        ORDER BY data_criacao ASC, id_solicitacao ASC
+                    """
+                    df_ori = pd.read_sql(query, conn_op, params=(cd_logado,))
                 
-                id_det = st.number_input("Digite o ID da solicitação para ver os detalhes/itens:", min_value=1, step=1)
-                if id_det:
-                    with get_conn(CRED_OP) as conn_det:
-                        df_det = pd.read_sql(f"SELECT * FROM itens_solicitacao WHERE id_solicitacao = {id_det}", conn_det)
-                    if not df_det.empty:
-                        st.subheader(f"Itens da Solicitação #{id_det}")
-                        st.dataframe(df_det, use_container_width=True)
-                    else:
-                        st.warning("Solicitação não encontrada ou sem itens.")
-        except Exception as e:
-            st.error(f"Erro ao carregar histórico: {e}")
+                if df_ori.empty:
+                    st.info(f"Nenhuma separação pendente para a unidade {cd_logado}.")
+                else:
+                    df_ori['data_formatada'] = pd.to_datetime(df_ori['data_criacao']).dt.date
+                    df_ori['chave_agrupamento'] = df_ori['cd_origem'] + " ➔ " + df_ori['cd_destino'] + " (" + df_ori['data_formatada'].astype(str) + ")"
+                    
+                    grupos = df_ori['chave_agrupamento'].unique()
+                    
+                    for g_idx, grupo_nome in enumerate(grupos):
+                        df_grupo = df_ori[df_ori['chave_agrupamento'] == grupo_nome]
+                        
+                        with st.container(border=True):
+                            st.subheader(f"📦 Solicitação de Transferência: {grupo_nome}")
+                            
+                            with st.form(f"form_grupo_separa_{g_idx}"):
+                                lista_coleta_inputs = []
+                                
+                                for _, row in df_grupo.iterrows():
+                                    id_sol = row['id_solicitacao']
+                                    st.markdown(f"**Item #{id_sol}** — {row['cod_produto']} - {row['descricao']}")
+                                    col_chk, col_sep, col_pb, col_pl, col_cub, col_plt = st.columns([1.2, 2, 2, 2, 2, 2])
+                                    
+                                    marcado = col_chk.checkbox("Separado?", key=f"chk_sep_{id_sol}")
+                                    v_sep = col_sep.number_input("Qtd Real", min_value=1, value=int(row['volume_solicitado']), key=f"vsep_{id_sol}")
+                                    v_pb = col_pb.number_input("P. Bruto (KG)", min_value=0.0, step=0.5, key=f"vpb_{id_sol}")
+                                    v_pl = col_pl.number_input("P. Líq (KG)", min_value=0.0, step=0.5, key=f"vpl_{id_sol}")
+                                    v_cub = col_cub.number_input("Cubagem (m³)", min_value=0.0, step=0.01, format="%.3f", key=f"vcub_{id_sol}")
+                                    v_plt = col_plt.number_input("Palets", min_value=1, value=1, key=f"vplt_{id_sol}")
+                                    
+                                    lista_coleta_inputs.append({
+                                        "id_sol": id_sol, "marcado": marcado, "v_sep": v_sep,
+                                        "v_pb": v_pb, "v_pl": v_pl, "v_cub": v_cub, "v_plt": v_plt, "desc": row['descricao']
+                                    })
+                                    st.markdown("<hr style='margin:10px 0; border:0.5px dashed #ccc;'>", unsafe_allow_html=True)
+                                
+                                if st.form_submit_button("💾 Salvar Itens Selecionados do Lote", type="primary", use_container_width=True):
+                                    itens_processados_cont = 0
+                                    sum_vol = 0
+                                    sum_pb = 0
+                                    sum_cub = 0
+                                    
+                                    with get_conn(CRED_OP) as conn_up:
+                                        with conn_up.cursor() as cur:
+                                            for item in lista_coleta_inputs:
+                                                if item['marcado']:
+                                                    cur.execute("""
+                                                        UPDATE solicitacoes_transferencia 
+                                                        SET separado = TRUE, qtd_volumes_separado = %s, peso_total_bruto_kg = %s, peso_total_liquido_kg = %s, tamanho_cubico_m3 = %s, qtd_unidades_por_palet = %s, status_atual = 'Pronto para Transporte', data_ultima_atualizacao = NOW()
+                                                        WHERE id_solicitacao = %s
+                                                    """, (item['v_sep'], item['v_pb'], item['v_pl'], item['v_cub'], item['v_plt'], item['id_sol']))
+                                                    
+                                                    sum_vol += item['v_sep']
+                                                    sum_pb += item['v_pb']
+                                                    sum_cub += item['v_cub']
+                                                    itens_processados_cont += 1
+                                        conn_up.commit()
+                                    
+                                    if itens_processados_cont > 0:
+                                        st.success(f"Itens processados e despachados para a fila de frete!")
+                                        dados_macros = {'qtd_vol': sum_vol, 'peso_bruto': sum_pb, 'cubagem': round(sum_cub, 3)}
+                                        email_modulo_3_resumido(grupo_nome, dados_macros, itens_processados_cont)
+                                        st.rerun()
+            except Exception as e:
+                st.error(f"Erro na origem do CD: {e}")
 
-if __name__ == '__main__':
-    main()
+        # --- ABA DE DESTINO TOTALMENTE CONSOLIDADA POR SOLICITAÇÃO ---
+        with tab_destino:
+            try:
+                with get_conn(CRED_OP) as conn_op:
+                    # Carrega as cargas que foram agendadas para este CD receptor
+                    df_dest = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status_atual = 'Agendado' AND cd_destino = %s", conn_op, params=(cd_logado,))
+                
+                if df_dest.empty:
+                    st.info("Nenhuma carga agendada para recebimento nesta filial.")
+                else:
+                    st.subheader("Recebimento e Conferência Física de Cargas")
+                    st.markdown("Marque o checkbox de conferência e valide os volumes físicos recebidos por produto do lote.")
+
+                    # Chave técnica de agrupamento por data e rota
+                    df_dest['data_formatada'] = pd.to_datetime(df_dest['data_criacao']).dt.date
+                    df_dest['chave_agrupamento'] = df_dest['cd_origem'] + " ➔ " + df_dest['cd_destino'] + " (" + df_dest['data_formatada'].astype(str) + ")"
+                    
+                    grupos_destino = df_dest['chave_agrupamento'].unique()
+                    
+                    for idx_d, nome_grupo in enumerate(grupos_destino):
+                        df_sub_dest = df_dest[df_dest['chave_agrupamento'] == nome_grupo]
+                        
+                        data_agenda_doca = pd.to_datetime(df_sub_dest['data_agendada_final'].iloc[0]).strftime('%d/%m/%Y')
+                        hora_agenda_doca = df_sub_dest['hora_agendada_final'].iloc[0]
+                        transp_responsavel = df_sub_dest['transportadora'].iloc[0]
+                        
+                        with st.container(border=True):
+                            st.markdown(f"### 📥 Recebimento de Carga: {nome_grupo}")
+                            st.caption(f"📅 **Janela de Doca:** {data_agenda_doca} às {hora_agenda_doca} | 🚛 **Transporte:** {transp_responsavel}")
+                            
+                            with st.form(f"form_recebimento_lote_{idx_d}"):
+                                lista_conferência_produtos = []
+                                
+                                # Loop dinâmico para renderizar as linhas internas do lote
+                                for inner_idx, r in df_sub_dest.iterrows():
+                                    id_solic = r['id_solicitacao']
+                                    # Se a quantidade separada não existir por algum motivo, usamos a solicitada
+                                    qtd_esperada = int(r['qtd_volumes_separado'] if r['qtd_volumes_separado'] is not None else r['volume_solicitado'])
+                                    
+                                    col_p_info, col_p_chk, col_p_qtd = st.columns([5, 1.5, 2])
+                                    
+                                    col_p_info.markdown(f"**Item #{id_solic}** — {r['cod_produto']} - {r['descricao']}  \n*Unidade Medida:* {r['unidade_medida']} | *Qtd Despachada CD Origem:* **{qtd_esperada}**")
+                                    
+                                    marcado_conf = col_p_chk.checkbox("Conferido", key=f"chk_conf_{id_solic}")
+                                    qtd_recebida_fisica = col_p_qtd.number_input("Qtd Recebida", min_value=0, value=qtd_esperada, key=f"val_conf_{id_solic}")
+                                    
+                                    lista_conferência_produtos.append({
+                                        "id_sol": id_solic, "conferido": marcado_conf, "qtd_física": qtd_recebida_fisica, "row": r
+                                    })
+                                    st.markdown("<hr style='margin:8px 0; border:0.5px dotted #eee;'>", unsafe_allow_html=True)
+                                
+                                # Checkbox de integridade legal/física do lote inteiro
+                                chk_termo = st.checkbox("Confirmo a conferência física e o encerramento das paletas acima descritas", key=f"chk_termo_{idx_d}")
+                                
+                                if st.form_submit_button("🏁 Finalizar Recebimento e Atualizar Estoque (Lote)", use_container_width=True):
+                                    if not chk_termo:
+                                        st.error("É obrigatório marcar o termo de validação física para encerrar o lote.")
+                                    else:
+                                        validacao_itens_ok = True
+                                        # Verifica se o conferente esqueceu de marcar a caixa 'Conferido' de alguma linha
+                                        for item in lista_conferência_produtos:
+                                            if not item['conferido']:
+                                                st.error(f"Por favor, confirme a verificação do Item #{item['id_sol']} marcando a caixa 'Conferido'.")
+                                                validacao_itens_ok = False
+                                        
+                                        if validacao_itens_ok:
+                                            # Bloco de execução no banco de dados
+                                            with get_conn(CRED_OP) as conn_final:
+                                                with conn_final.cursor() as cur:
+                                                    html_tabela_email = "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%;'><tr style='background-color:#e1f5fe;'><th>ID Item</th><th>Produto</th><th>Qtd Despachada</th><th>Qtd Recebida</th></tr>"
+                                                    
+                                                    for item in lista_conferência_produtos:
+                                                        r_dados = item['row']
+                                                        qtd_desp = int(r_dados['qtd_volumes_separado'] if r_dados['qtd_volumes_separado'] is not None else r_dados['volume_solicitado'])
+                                                        
+                                                        # Atualiza linha por linha do banco mudando o status para Concluído e injetando a quantidade real do balcão
+                                                        cur.execute("""
+                                                            UPDATE solicitacoes_transferencia 
+                                                            SET status_atual = 'Concluído', 
+                                                                volume_recebido = %s, 
+                                                                data_ultima_atualizacao = NOW()
+                                                            WHERE id_solicitacao = %s
+                                                        """, (item['qtd_física'], item['id_sol']))
+                                                        
+                                                        # Constrói o HTML dinâmico com cor de aviso caso haja quebra ou divergência de carga
+                                                        estilo_aviso = "style='color:#d32f2f; font-weight:bold;'" if item['qtd_física'] != qtd_desp else ""
+                                                        html_tabela_email += f"<tr><td>#{item['id_sol']}</td><td>{r_dados['cod_produto']} - {r_dados['descricao']}</td><td>{qtd_desp}</td><td {estilo_aviso}>{item['qtd_física']}</td></tr>"
+                                                    
+                                                    html_tabela_email += "</table>"
+                                                    conn_final.commit()
+                                            
+                                            st.success(f"Excelente! Recebimento do lote finalizado com sucesso.")
+                                            # Dispara um único e-mail para todos os envolvidos notificando o fechamento do lote
+                                            email_lote_concluido(nome_grupo, len(lista_conferência_produtos), html_tabela_email)
+                                            st.rerun()
+            except Exception as e:
+                st.error(f"Erro no fechamento do CD destino: {e}")
