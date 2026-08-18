@@ -33,18 +33,21 @@ SMTP_PORT = 587
 SMTP_USER = "luis.bedeschi@friorio.com.br" 
 SMTP_PASSWORD = "Cliffburton1982!"
 
-# --- MAPEAMENTO DINÂMICO DE E-MAILS POR SETOR / CD ---
+# --- MAPEAMENTO DINÂMICO DE E-MAILS COM REDUNDÂNCIA ---
 EMAIL_PLANEJAMENTO = "planejamento@friorio.com.br"
 EMAIL_COMPRAS      = "conrado@friorio.com.br"  
-EMAIL_TRANSPORTES  = "bruna.nogueira@friorio.com.br"  
+EMAIL_TRANSPORTES  = ["bruna.nogueira@friorio.com.br", "rubens.souza@friorio.com.br"]
 
 MAP_EMAILS_CDS = {
-    "01 - Serra": "ronaldo.pereira@friorio.com.br",       
-    "03 - Blumenau": "rafael.vieira@friorio.com.br",    
-    "06 - São Paulo": "fernando.brito@friorio.com.br"    
+    "01 - Serra": ["ronaldo.pereira@friorio.com.br", "thuane.rodrigues@friorio.com.br"],       
+    "03 - Blumenau": ["rafael.vieira@friorio.com.br", "vinicius.damasio@friorio.com.br"],    
+    "06 - São Paulo": ["fernando.brito@friorio.com.br", "fabian.nahuel@friorio.com.br"]    
 }
 
-TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS, EMAIL_TRANSPORTES] + list(MAP_EMAILS_CDS.values())
+# Consolidação de todos os envolvidos para encerramento de lote
+TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS] + EMAIL_TRANSPORTES
+for lista_cd in MAP_EMAILS_CDS.values():
+    TODOS_ENVOLVIDOS.extend(lista_cd)
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="FrioRio - Fluxo de Transferências Inter-CD", layout="wide")
@@ -67,8 +70,10 @@ def disparar_email(destinatarios, assunto, corpo_html):
     try:
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
+        
+        # Tratamento para aceitar tanto string única quanto lista de e-mails
         if isinstance(destinatarios, list):
-            destinatarios_unicos = list(set(destinatarios))
+            destinatarios_unicos = list(set([d for d in destinatarios if d]))
             msg['To'] = ", ".join(destinatarios_unicos)
             lista_envio = destinatarios_unicos
         else:
@@ -679,46 +684,53 @@ else:
                                 for _, row in df_grupo.iterrows():
                                     id_sol = row['id_solicitacao']
                                     st.markdown(f"**Item #{id_sol}** — {row['cod_produto']} - {row['descricao']}")
-                                    col_chk, col_sep, col_pb, col_pl, col_cub, col_plt = st.columns([1.2, 2, 2, 2, 2, 2])
+                                    col_chk, col_sep = st.columns([1.2, 8.8])
                                     
                                     marcado = col_chk.checkbox("Separado?", key=f"chk_sep_{id_sol}")
-                                    v_sep = col_sep.number_input("Qtd Real", min_value=1, value=int(row['volume_solicitado']), key=f"vsep_{id_sol}")
-                                    v_pb = col_pb.number_input("P. Bruto (KG)", min_value=0.0, step=0.5, key=f"vpb_{id_sol}")
-                                    v_pl = col_pl.number_input("P. Líq (KG)", min_value=0.0, step=0.5, key=f"vpl_{id_sol}")
-                                    v_cub = col_cub.number_input("Cubagem (m³)", min_value=0.0, step=0.01, format="%.3f", key=f"vcub_{id_sol}")
-                                    v_plt = col_plt.number_input("Palets", min_value=1, value=1, key=f"vplt_{id_sol}")
+                                    v_sep = col_sep.number_input("Qtd. Real", min_value=1, value=int(row['volume_solicitado']), key=f"vsep_{id_sol}")
                                     
                                     lista_coleta_inputs.append({
-                                        "id_sol": id_sol, "marcado": marcado, "v_sep": v_sep,
-                                        "v_pb": v_pb, "v_pl": v_pl, "v_cub": v_cub, "v_plt": v_plt, "desc": row['descricao']
+                                        "id_sol": id_sol, "marcado": marcado, "v_sep": v_sep, "desc": row['descricao']
                                     })
                                     st.markdown("<hr style='margin:10px 0; border:0.5px dashed #ccc;'>", unsafe_allow_html=True)
                                 
+                                st.markdown("### 📊 Dados Totais da Carga (Consolidado)")
+                                col_tot_plt, col_tot_pb, col_tot_pl = st.columns(3)
+                                total_palets_lote = col_tot_plt.number_input("Quantidade de Palets", min_value=1, value=1, key=f"tot_plt_{g_idx}")
+                                total_pb_lote = col_tot_pb.number_input("P. Bruto (KG)", min_value=0.0, step=0.5, key=f"tot_pb_{g_idx}")
+                                total_pl_lote = col_tot_pl.number_input("P.Liq. (KG)", min_value=0.0, step=0.5, key=f"tot_pl_{g_idx}")
+                                
                                 if st.form_submit_button("💾 Salvar Itens Selecionados do Lote", type="primary", use_container_width=True):
-                                    itens_processados_cont = 0
-                                    sum_vol = 0
-                                    sum_pb = 0
-                                    sum_cub = 0
+                                    itens_marcados = [item for item in lista_coleta_inputs if item['marcado']]
+                                    itens_processados_cont = len(itens_marcados)
                                     
-                                    with get_conn(CRED_OP) as conn_up:
-                                        with conn_up.cursor() as cur:
-                                            for item in lista_coleta_inputs:
-                                                if item['marcado']:
+                                    if itens_processados_cont == 0:
+                                        st.error("Nenum item foi marcado como separado.")
+                                    else:
+                                        sum_vol = sum(item['v_sep'] for item in itens_marcados)
+                                        pb_por_item = round(total_pb_lote / itens_processados_cont, 2)
+                                        pl_por_item = round(total_pl_lote / itens_processados_cont, 2)
+                                        plt_por_item = int(max(1, total_palets_lote // itens_processados_cont))
+                                        
+                                        with get_conn(CRED_OP) as conn_up:
+                                            with conn_up.cursor() as cur:
+                                                for item in itens_marcados:
                                                     cur.execute("""
                                                         UPDATE solicitacoes_transferencia 
-                                                        SET separado = TRUE, qtd_volumes_separado = %s, peso_total_bruto_kg = %s, peso_total_liquido_kg = %s, tamanho_cubico_m3 = %s, qtd_unidades_por_palet = %s, status_atual = 'Pronto para Transporte', data_ultima_atualizacao = NOW()
+                                                        SET separado = TRUE, 
+                                                            qtd_volumes_separado = %s, 
+                                                            peso_total_bruto_kg = %s, 
+                                                            peso_total_liquido_kg = %s, 
+                                                            tamanho_cubico_m3 = 0.0, 
+                                                            qtd_unidades_por_palet = %s, 
+                                                            status_atual = 'Pronto para Transporte', 
+                                                            data_ultima_atualizacao = NOW()
                                                         WHERE id_solicitacao = %s
-                                                    """, (item['v_sep'], item['v_pb'], item['v_pl'], item['v_cub'], item['v_plt'], item['id_sol']))
-                                                    
-                                                    sum_vol += item['v_sep']
-                                                    sum_pb += item['v_pb']
-                                                    sum_cub += item['v_cub']
-                                                    itens_processados_cont += 1
-                                        conn_up.commit()
-                                    
-                                    if itens_processados_cont > 0:
-                                        st.success(f"Itens processados e despachados para a fila de frete!")
-                                        dados_macros = {'qtd_vol': sum_vol, 'peso_bruto': sum_pb, 'cubagem': round(sum_cub, 3)}
+                                                    """, (item['v_sep'], pb_por_item, pl_por_item, plt_por_item, item['id_sol']))
+                                            conn_up.commit()
+                                        
+                                        st.success("Itens processados e despachados para a fila de frete!")
+                                        dados_macros = {'qtd_vol': sum_vol, 'peso_bruto': total_pb_lote, 'cubagem': 0.0}
                                         email_modulo_3_resumido(grupo_nome, dados_macros, itens_processados_cont)
                                         st.rerun()
             except Exception as e:
