@@ -40,7 +40,7 @@ EMAIL_TRANSPORTES  = ["bruna.nogueira@friorio.com.br", "rubens.souza@friorio.com
 
 MAP_EMAILS_CDS = {
     "01 - Serra": ["ronaldo.pereira@friorio.com.br", "thuane.rodrigues@friorio.com.br", "planejamento@friorio.com.br"],       
-    "03 - Blumenau": ["rafael.vieira@friorio.com.br", "vinicius.damasio@friorio.com.br", "joanna.ercolin@friorio.com.br"],    
+    "03 - Blumenau": ["rafael.vieira@friorio.com.br", "vinicius.damasio@friorio.com.br", "planejamento@friorio.com.br"],    
     "06 - São Paulo": ["fernando.brito@friorio.com.br", "fabian.nahuel@friorio.com.br", "planejamento@friorio.com.br"]    
 }
 
@@ -76,15 +76,15 @@ def get_conn(cred):
     return psycopg2.connect(**cred)
 
 # Helper para garantir extração correta de e-mails dos CDs
-def obter_emails_destinatarios(cd_destino):
-    if not cd_destino:
+def obter_emails_destinatarios(cd_nome):
+    if not cd_nome:
         return [EMAIL_PLANEJAMENTO]
     
-    if cd_destino in MAP_EMAILS_CDS:
-        return MAP_EMAILS_CDS[cd_destino]
+    if cd_nome in MAP_EMAILS_CDS:
+        return MAP_EMAILS_CDS[cd_nome]
     
     for chave, emails in MAP_EMAILS_CDS.items():
-        if chave in str(cd_destino):
+        if chave in str(cd_nome):
             return emails
             
     return [EMAIL_PLANEJAMENTO]
@@ -172,17 +172,19 @@ def email_item_revisado_planejamento(id_solic, produto, rota, nova_qtd, justific
     """
     disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
 
-def email_lote_aprovados_planejamento(tabela_html, total_itens):
+# CORRIGIDO: Agora recebe a lista de e-mails dos CDs envolvidos no lote aprovado
+def email_lote_aprovados_planejamento(tabela_html, total_itens, lista_emails_cds):
     assunto = f"🟢 Módulo 2: {total_itens} Item(ns) de Transferência APROVADOS pelo Planejamento"
     corpo = f"""
     <html><body>
         <h2>Itens de Carga Liberados para Separação</h2>
         <p>O setor de Planejamento avaliou e aprovou os seguintes itens para movimentação entre as filiais.</p>
         <br>{tabela_html}
-        <p><i>Ação necessária nos respectivos CDs de Origem: Iniciar os procedimentos de separação e cubagem.</i></p>
+        <p><i>Ação necessária nos respectivos CDs de Origem: Iniciar os procedimentos de separação e cubagem no painel.</i></p>
     </body></html>
     """
-    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
+    destinatarios = [EMAIL_PLANEJAMENTO] + lista_emails_cds
+    disparar_email(destinatarios, assunto, corpo)
 
 def email_lote_recusados_planejamento(tabela_html, total_itens):
     assunto = f"🔴 Módulo 2: {total_itens} Item(ns) de Transferência RECUSADOS pelo Planejamento"
@@ -542,13 +544,27 @@ else:
                                                 cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Recusado', justificativa_recusa = %s, data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s", (item['motivo'].strip(), item['id_sol']))
                                         conn_processa.commit()
                                     
+                                    # CORREÇÃO INTEGRADA AQUI:
                                     if lote_update_aprovados:
                                         html_ap = "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%;'><tr style='background-color:#e8f5e9;'><th>ID</th><th>Produto</th><th>Rota</th><th>Quantidade</th></tr>"
+                                        emails_cds_envolvidos = []
+                                        
                                         for item in lote_update_aprovados:
                                             r = item['row']
                                             html_ap += f"<tr><td>#{item['id_sol']}</td><td>{r['cod_produto']} - {r['descricao']}</td><td>{r['cd_origem']} ➔ {r['cd_destino']}</td><td>{r['volume_solicitado']} {r['unidade_medida']}</td></tr>"
+                                            
+                                            # Busca e-mails do CD de Origem para que eles recebam o e-mail de separação
+                                            emails_orig = obter_emails_destinatarios(r['cd_origem'])
+                                            if isinstance(emails_orig, list):
+                                                emails_cds_envolvidos.extend(emails_orig)
+                                            else:
+                                                emails_cds_envolvidos.append(emails_orig)
+
                                         html_ap += "</table>"
-                                        email_lote_aprovados_planejamento(html_ap, len(lote_update_aprovados))
+                                        emails_cds_envolvidos = list(set(emails_cds_envolvidos))
+                                        
+                                        # Dispara e-mail para Planejamento + Responsáveis dos CDs de Origem
+                                        email_lote_aprovados_planejamento(html_ap, len(lote_update_aprovados), emails_cds_envolvidos)
                                         
                                     if lote_update_recusados:
                                         html_rp = "<table border='1' cellpadding='5' style='border-collapse:collapse; width:100%;'><tr style='background-color:#ffebee;'><th>ID</th><th>Produto</th><th>Rota</th><th>Quantidade</th><th>Motivo da Recusa</th></tr>"
@@ -745,7 +761,7 @@ else:
                                     itens_processados_cont = len(itens_marcados)
                                     
                                     if itens_processados_cont == 0:
-                                        st.error("Nenhum item foi marcado como separado.")
+                                        st.error("Nenum item foi marcado como separado.")
                                     else:
                                         sum_vol = sum(item['v_sep'] for item in itens_marcados)
                                         pb_por_item = round(total_pb_lote / itens_processados_cont, 2)
