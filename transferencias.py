@@ -33,21 +33,18 @@ SMTP_PORT = 587
 SMTP_USER = "luis.bedeschi@friorio.com.br" 
 SMTP_PASSWORD = "Cliffburton1982!"
 
-# --- MAPEAMENTO DINÂMICO DE E-MAILS COM REDUNDÂNCIA ---
+# --- MAPEAMENTO DINÂMICO DE E-MAILS POR SETOR / CD ---
 EMAIL_PLANEJAMENTO = "planejamento@friorio.com.br"
 EMAIL_COMPRAS      = "conrado@friorio.com.br"  
-EMAIL_TRANSPORTES  = ["bruna.nogueira@friorio.com.br", "rubens.souza@friorio.com.br"]
+EMAIL_TRANSPORTES  = "bruna.nogueira@friorio.com.br"  
 
 MAP_EMAILS_CDS = {
-    "01 - Serra": ["ronaldo.pereira@friorio.com.br", "thuane.rodrigues@friorio.com.br"],       
-    "03 - Blumenau": ["rafael.vieira@friorio.com.br", "vinicius.damasio@friorio.com.br"],    
-    "06 - São Paulo": ["fernando.brito@friorio.com.br", "fabian.nahuel@friorio.com.br"]    
+    "01 - Serra": "ronaldo.pereira@friorio.com.br",       
+    "03 - Blumenau": "rafael.vieira@friorio.com.br",    
+    "06 - São Paulo": "fernando.brito@friorio.com.br"    
 }
 
-# Consolidação de todos os envolvidos para encerramento de lote
-TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS] + EMAIL_TRANSPORTES
-for lista_cd in MAP_EMAILS_CDS.values():
-    TODOS_ENVOLVIDOS.extend(lista_cd)
+TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS, EMAIL_TRANSPORTES] + list(MAP_EMAILS_CDS.values())
 
 # --- CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(page_title="FrioRio - Fluxo de Transferências Inter-CD", layout="wide")
@@ -70,10 +67,8 @@ def disparar_email(destinatarios, assunto, corpo_html):
     try:
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
-        
-        # Tratamento para aceitar tanto string única quanto lista de e-mails
         if isinstance(destinatarios, list):
-            destinatarios_unicos = list(set([d for d in destinatarios if d]))
+            destinatarios_unicos = list(set(destinatarios))
             msg['To'] = ", ".join(destinatarios_unicos)
             lista_envio = destinatarios_unicos
         else:
@@ -371,7 +366,7 @@ else:
                     df_hist = pd.read_sql("SELECT * FROM solicitacoes_transferencia ORDER BY id_solicitacao DESC", conn_op)
                 
                 if df_hist.empty:
-                    st.info("Nenhum histórico encontrado.")
+                    st.info("Nenum histórico encontrado.")
                 else:
                     for idx, row in df_hist.iterrows():
                         status = row['status_atual']
@@ -705,7 +700,7 @@ else:
                                     itens_processados_cont = len(itens_marcados)
                                     
                                     if itens_processados_cont == 0:
-                                        st.error("Nenum item foi marcado como separado.")
+                                        st.error("Nenhum item foi marcado como separado.")
                                     else:
                                         sum_vol = sum(item['v_sep'] for item in itens_marcados)
                                         pb_por_item = round(total_pb_lote / itens_processados_cont, 2)
