@@ -40,7 +40,7 @@ EMAIL_TRANSPORTES  = ["bruna.nogueira@friorio.com.br", "rubens.souza@friorio.com
 
 MAP_EMAILS_CDS = {
     "01 - Serra": ["ronaldo.pereira@friorio.com.br", "thuane.rodrigues@friorio.com.br", "planejamento@friorio.com.br"],       
-    "03 - Blumenau": ["rafael.vieira@friorio.com.br", "vinicius.damasio@friorio.com.br", "planejamento@friorio.com.br"],    
+    "03 - Blumenau": ["rafael.vieira@friorio.com.br", "vinicius.damasio@friorio.com.br", "joanna.ercolin@friorio.com.br"],    
     "06 - São Paulo": ["fernando.brito@friorio.com.br", "fabian.nahuel@friorio.com.br", "planejamento@friorio.com.br"]    
 }
 
