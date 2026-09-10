@@ -172,7 +172,6 @@ def email_item_revisado_planejamento(id_solic, produto, rota, nova_qtd, justific
     """
     disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
 
-# CORRIGIDO: Agora recebe a lista de e-mails dos CDs envolvidos no lote aprovado
 def email_lote_aprovados_planejamento(tabela_html, total_itens, lista_emails_cds):
     assunto = f"🟢 Módulo 2: {total_itens} Item(ns) de Transferência APROVADOS pelo Planejamento"
     corpo = f"""
@@ -287,9 +286,9 @@ else:
         st.rerun()
 
     # =========================================================================
-    # MÓDULO DE COMPRAS 
+    # MÓDULO DE COMPRAS / MASTER
     # =========================================================================
-    if st.session_state.depto == "Compras":
+    if st.session_state.depto in ["Compras", "Master"]:
         st.header("📦 Módulo de Compras - Ordem de Carga Multi-Produtos")
         tab_nova, tab_acompanhar = st.tabs(["🆕 Criar Ordem Multi-Itens", "🔍 Acompanhar e Corrigir"])
         
@@ -662,7 +661,6 @@ else:
                     total_peso_liquido = float(df_sub_grupo['peso_total_liquido_kg'].sum())
                     total_cubagem = float(df_sub_grupo['tamanho_cubico_m3'].sum())
                     
-                    # ALTERADO CONFORME SOLICITADO: Pega o valor exato da 1ª linha do lote sem somar
                     total_palets = int(df_sub_grupo['qtd_unidades_por_palet'].iloc[0])
                     lista_ids_grupo = df_sub_grupo['id_solicitacao'].tolist()
                     
@@ -766,7 +764,6 @@ else:
                                         pb_por_item = round(total_pb_lote / itens_processados_cont, 2)
                                         pl_por_item = round(total_pl_lote / itens_processados_cont, 2)
                                         
-                                        # ALTERADO CONFORME SOLICITADO: Grava o valor total exato em todas as linhas
                                         plt_por_item = int(total_palets_lote)
                                         
                                         with get_conn(CRED_OP) as conn_up:
