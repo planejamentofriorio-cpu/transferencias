@@ -193,6 +193,11 @@ def email_lote_concluido(nome_grupo, nota_fiscal, resumo_texto):
     corpo = 'Conferencia de Número do Pedido Finalizada\n\nO CD deu entrada no Número do Pedido **' + str(nota_fiscal) + '** do lote: **' + str(nome_grupo) + '**.\n\nResumo:\n' + str(resumo_texto)
     disparar_email(TODOS_ENVOLVIDOS, assunto, corpo)
 
+def email_transferencia_cancelada_planejamento(id_solic, produto, origem, destino, motivo):
+    assunto = '❌ ALERTA: Transferência ID #' + str(id_solic) + ' Cancelada pelo Planejamento'
+    corpo = 'Transferência Cancelada\n\nA solicitação abaixo foi cancelada pelo Planejamento:\n- ID da Solicitação: #' + str(id_solic) + '\n- Produto: ' + str(produto) + '\n- Rota: ' + str(origem) + ' ➔ ' + str(destino) + '\n- Motivo/Justificativa: ' + str(motivo)
+    disparar_email(TODOS_ENVOLVIDOS, assunto, corpo)
+
 if st.session_state.erro_email:
     with st.container(border=True):
         st.error('❌ Erro no envio de e-mail:')
@@ -354,7 +359,7 @@ else:
         with tab_acompanhar:
             try:
                 with get_conn(CRED_OP) as conn_op:
-                    df_hist = pd.read_sql('SELECT * FROM solicitacoes_transferencia ORDER BY id_solicitacao DESC', conn_op)
+                    df_hist = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status_atual != 'CanceladoPlanejamento' ORDER BY id_solicitacao DESC", conn_op)
                 
                 if df_hist.empty:
                     st.info('Nenhum histórico encontrado.')
@@ -404,7 +409,7 @@ else:
                                     if st.button('🗑️ Excluir', key='del_prod_' + str(id_sol), type='primary', use_container_width=True):
                                         with get_conn(CRED_OP) as conn_del:
                                             with conn_del.cursor() as cur:
-                                                cur.execute('UPDATE solicitacoes_transferencia SET status_atual = \'Cancelado\' WHERE id_solicitacao = %s', (id_sol,))
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Cancelado' WHERE id_solicitacao = %s", (id_sol,))
                                                 conn_del.commit()
                                         st.toast('Produto excluído!')
                                         st.rerun()
@@ -413,12 +418,12 @@ else:
 
     elif st.session_state.depto == 'Planejamento':
         st.header('📊 Módulo de Planejamento - Avaliação de Demandas')
-        tab_aprov, tab_agend = st.tabs(['📋 Aprovar Linhas de Solicitação (Lote)', '📅 Agendar Janelas de Doca (Consolidado)'])
+        tab_aprov, tab_agend, tab_cancelar = st.tabs(['📋 Aprovar Linhas (Lote)', '📅 Agendar Janelas de Doca', '🗑️ Gerenciar e Cancelar Transferências'])
         
         with tab_aprov:
             try:
                 with get_conn(CRED_OP) as conn_op:
-                    df_sol = pd.read_sql('SELECT * FROM solicitacoes_transferencia WHERE status_atual = \'Pendente Aprovação\' ORDER BY id_solicitacao ASC', conn_op)
+                    df_sol = pd.read_sql("SELECT * FROM solicitacoes_transferencia WHERE status_atual = 'Pendente Aprovação' ORDER BY id_solicitacao ASC", conn_op)
                 
                 if df_sol.empty:
                     st.info('Nenhum item pendente de aprovação.')
@@ -470,9 +475,9 @@ else:
                                     with get_conn(CRED_OP) as conn_p:
                                         with conn_p.cursor() as cur:
                                             for item in lote_aprov:
-                                                cur.execute('UPDATE solicitacoes_transferencia SET status_atual = \'Aprovado\', data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s', (item['id_sol'],))
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Aprovado', data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s", (item['id_sol'],))
                                             for item in lote_rec:
-                                                cur.execute('UPDATE solicitacoes_transferencia SET status_atual = \'Recusado\', justificativa_recusa = %s, data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s', (item['motivo'].strip(), item['id_sol']))
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'Recusado', justificativa_recusa = %s, data_ultima_atualizacao = NOW() WHERE id_solicitacao = %s", (item['motivo'].strip(), item['id_sol']))
                                         conn_p.commit()
                                     
                                     if lote_aprov:
@@ -550,6 +555,66 @@ else:
                                         st.rerun()
             except Exception as e:
                 st.error('Erro no agendamento: ' + str(e))
+
+        with tab_cancelar:
+            st.subheader('🗑️ Gestão e Cancelamento de Transferências (Exclusivo Planejamento)')
+            st.markdown('Utilize os filtros abaixo para localizar e cancelar solicitações de transferência.')
+            
+            with st.form('form_filtros_cancelamento'):
+                col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+                filtro_id = col_f1.text_input('Filtrar por ID Exato')
+                filtro_origem = col_f2.selectbox('CD Origem', ['Todos', '01 - Serra', '03 - Blumenau', '06 - São Paulo'])
+                filtro_destino = col_f3.selectbox('CD Destino', ['Todos', '01 - Serra', '03 - Blumenau', '06 - São Paulo'])
+                filtro_periodo = col_f4.date_input('Filtrar a partir da Data', value=None)
+                
+                btn_filtrar = st.form_submit_button('🔍 Buscar Transferências', use_container_width=True)
+
+            try:
+                with get_conn(CRED_OP) as conn_op:
+                    query_busca = "SELECT * FROM solicitacoes_transferencia WHERE status_atual != 'CanceladoPlanejamento'"
+                    params_busca = []
+                    
+                    if filtro_id.strip():
+                        query_busca += " AND id_solicitacao = %s"
+                        params_busca.append(int(filtro_id.strip()))
+                    if filtro_origem != 'Todos':
+                        query_busca += " AND cd_origem = %s"
+                        params_busca.append(filtro_origem)
+                    if filtro_destino != 'Todos':
+                        query_busca += " AND cd_destino = %s"
+                        params_busca.append(filtro_destino)
+                    if filtro_periodo:
+                        query_busca += " AND data_criacao >= %s"
+                        params_busca.append(filtro_periodo)
+                        
+                    query_busca += " ORDER BY id_solicitacao DESC LIMIT 50"
+                    df_busca = pd.read_sql(query_busca, conn_op, params=params_busca)
+                
+                if df_busca.empty:
+                    st.info('Nenhuma transferência encontrada com os filtros informados.')
+                else:
+                    st.write(f'**Resultados encontrados ({len(df_busca)}):**')
+                    for _, r in df_busca.iterrows():
+                        id_s = r['id_solicitacao']
+                        with st.container(border=True):
+                            st.markdown(f'**ID #{id_s}** — Produto: `{r["cod_produto"]} - {r["descricao"]}` | Status Atual: `{r["status_atual"]}`')
+                            st.write(f'**Rota:** {r["cd_origem"]} ➔ {r["cd_destino"]} | **Qtd:** {r["volume_solicitado"]} {r["unidade_medida"]} | **Criado por:** {r["criado_por"]}')
+                            
+                            with st.form(f'form_canc_id_{id_s}'):
+                                motivo_canc = st.text_input('Motivo / Justificativa para o Cancelamento', key=f'motivo_c_{id_s}')
+                                if st.form_submit_button('❌ Cancelar Definitivamente esta Transferência', type='primary'):
+                                    if not motivo_canc.strip():
+                                        st.error('Informe o motivo do cancelamento.')
+                                    else:
+                                        with get_conn(CRED_OP) as conn_upc:
+                                            with conn_upc.cursor() as cur:
+                                                cur.execute("UPDATE solicitacoes_transferencia SET status_atual = 'CanceladoPlanejamento', justificativa_recusa = %s WHERE id_solicitacao = %s", (motivo_canc.strip(), id_s))
+                                                conn_upc.commit()
+                                        st.success(f'Transferência ID #{id_s} cancelada com sucesso!')
+                                        email_transferencia_cancelada_planejamento(id_s, r['descricao'], r['cd_origem'], r['cd_destino'], motivo_canc.strip())
+                                        st.rerun()
+            except Exception as ex_busca:
+                st.error('Erro ao buscar transferências: ' + str(ex_busca))
 
     elif st.session_state.depto == 'Transportes':
         st.header('🚛 Módulo de Cotação e Fretes')
@@ -682,7 +747,6 @@ else:
                                                 resumo_detalhes_origem += '- ID #' + str(item['id_sol']) + ': ' + str(item['row_dados']['cod_produto']) + ' - ' + str(item['row_dados']['descricao']) + ' (' + str(item['quantidade']) + ' ' + str(item['row_dados']['unidade_medida']) + ')\n'
                                             conn_ins.commit()
                                     
-                                    # DISPARA O E-MAIL IMEDIATAMENTE AO TRANSPORTE PARA COTAÇÃO APÓS O DESPACHO DA ORIGEM
                                     rota_completa = str(cd_logado) + ' ➔ ' + str(cd_destino_geral)
                                     email_modulo_3_resumido(rota_completa, input_nf_lote.strip(), int(input_volumetria), len(itens_selecionados), resumo_detalhes_origem)
 
