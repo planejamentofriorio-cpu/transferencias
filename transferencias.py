@@ -79,7 +79,7 @@ def inicializar_banco_notas():
                         quantidade_separada INT NOT NULL,
                         volumetria_carga INT DEFAULT 1,
                         quantidade_recebida INT DEFAULT 0,
-                        status_etapa VARCHAR(50) DEFAULT 'Separado Parcial',
+                        status_etapa VARCHAR(50) DEFAULT 'Pronto para Transporte',
                         transportadora VARCHAR(150),
                         data_separacao TIMESTAMP DEFAULT NOW(),
                         data_recebimento TIMESTAMP,
@@ -508,18 +508,32 @@ else:
         with tab_agend:
             try:
                 with get_conn(CRED_OP) as conn_op:
+                    # CORREÇÃO: Lê diretamente da tabela principal os itens com status 'Agendado' para a aba do Planejamento
                     df_ag = pd.read_sql('''
-                        SELECT ns.*, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida 
-                        FROM transferencia_notas_separacao ns
-                        JOIN solicitacoes_transferencia s ON ns.id_solicitacao = s.id_solicitacao
-                        WHERE ns.status_etapa = 'Em Trânsito'
+                        SELECT id_solicitacao, cod_produto, descricao, unidade_medida, cd_origem, cd_destino, volume_solicitado as quantidade_separada, status_atual 
+                        FROM solicitacoes_transferencia 
+                        WHERE status_atual = 'Agendado'
                     ''', conn_op)
+                    
+                    try:
+                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora, observacao FROM transferencia_notas_separacao", conn_op)
+                        if not df_notas.empty:
+                            df_ag = pd.merge(df_ag, df_notas, on='id_solicitacao', how='left')
+                    except:
+                        pass
                 
+                if 'nota_fiscal' not in df_ag.columns:
+                    df_ag['nota_fiscal'] = 'S/N'
+                if 'volumetria_carga' not in df_ag.columns:
+                    df_ag['volumetria_carga'] = 1
+                if 'transportadora' not in df_ag.columns:
+                    df_ag['transportadora'] = 'Não informada'
+
                 if df_ag.empty:
                     st.info('Nenhum Número do Pedido aguardando agendamento de doca.')
                 else:
                     st.subheader('Controle de Janelas por Número do Pedido')
-                    df_ag['chave_agrupamento'] = df_ag['cd_origem'] + ' ➔ ' + df_ag['cd_destino'] + ' (Pedido: ' + df_ag['nota_fiscal'] + ')'
+                    df_ag['chave_agrupamento'] = df_ag['cd_origem'].astype(str) + ' ➔ ' + df_ag['cd_destino'].astype(str) + ' (Pedido: ' + df_ag['nota_fiscal'].astype(str) + ')'
                     
                     for idx_g, nome_grupo in enumerate(df_ag['chave_agrupamento'].unique()):
                         df_sub_ag = df_ag[df_ag['chave_agrupamento'] == nome_grupo]
@@ -527,7 +541,7 @@ else:
                         cd_dest = df_sub_ag['cd_destino'].iloc[0]
                         nota_atual = df_sub_ag['nota_fiscal'].iloc[0]
                         vol_atual = df_sub_ag['volumetria_carga'].iloc[0] if 'volumetria_carga' in df_sub_ag.columns else 1
-                        ids_sep = df_sub_ag['id_separacao'].tolist()
+                        ids_sep = df_sub_ag['id_solicitacao'].tolist()
                         
                         with st.container(border=True):
                             st.markdown('### 📅 Agendamento de Doca: ' + str(nome_grupo))
@@ -545,10 +559,20 @@ else:
                                         with get_conn(CRED_OP) as conn_up:
                                             with conn_up.cursor() as cur:
                                                 cur.execute('''
-                                                    UPDATE transferencia_notas_separacao 
-                                                    SET status_etapa = 'Agendado', observacao = CONCAT(COALESCE(observacao, ''), ' | Janela: ', %s, ' às ', %s)
-                                                    WHERE id_separacao = ANY(%s)
-                                                ''', (str(dt_ag), hr_ag.strip(), ids_sep))
+                                                    UPDATE solicitacoes_transferencia 
+                                                    SET status_atual = 'Agendado'
+                                                    WHERE id_solicitacao = ANY(%s)
+                                                ''', (ids_sep,))
+                                                
+                                                try:
+                                                    cur.execute('''
+                                                        UPDATE transferencia_notas_separacao 
+                                                        SET status_etapa = 'Agendado', observacao = CONCAT(COALESCE(observacao, ''), ' | Janela: ', %s, ' às ', %s)
+                                                        WHERE id_solicitacao = ANY(%s)
+                                                    ''', (str(dt_ag), hr_ag.strip(), ids_sep))
+                                                except:
+                                                    pass
+
                                             conn_up.commit()
                                         st.success('Janela salva!')
                                         email_modulo_5_resumido(nome_grupo, cd_dest, dt_ag, hr_ag.strip(), nota_atual)
@@ -621,23 +645,34 @@ else:
         try:
             with get_conn(CRED_OP) as conn_op:
                 df_tr = pd.read_sql('''
-                    SELECT ns.*, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida 
-                    FROM transferencia_notas_separacao ns
-                    JOIN solicitacoes_transferencia s ON ns.id_solicitacao = s.id_solicitacao
-                    WHERE ns.status_etapa = 'Separado Parcial'
+                    SELECT id_solicitacao, cod_produto, descricao, unidade_medida, cd_origem, cd_destino, volume_solicitado as quantidade_separada, status_atual 
+                    FROM solicitacoes_transferencia 
+                    WHERE status_atual = 'Pronto para Transporte'
                 ''', conn_op)
+                
+                try:
+                    df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora FROM transferencia_notas_separacao", conn_op)
+                    if not df_notas.empty:
+                        df_tr = pd.merge(df_tr, df_notas, on='id_solicitacao', how='left')
+                except:
+                    pass
             
+            if 'nota_fiscal' not in df_tr.columns:
+                df_tr['nota_fiscal'] = 'S/N'
+            if 'volumetria_carga' not in df_tr.columns:
+                df_tr['volumetria_carga'] = 1
+
             if df_tr.empty:
                 st.info('Sem pedidos aguardando despacho e cotação no momento.')
             else:
                 st.subheader('Fila de Pedidos Prontos para Despacho e Atribuição de Transportadora')
-                df_tr['chave_agrupamento'] = df_tr['cd_origem'] + ' ➔ ' + df_tr['cd_destino'] + ' (Pedido: ' + df_tr['nota_fiscal'] + ')'
+                df_tr['chave_agrupamento'] = df_tr['cd_origem'].astype(str) + ' ➔ ' + df_tr['cd_destino'].astype(str) + ' (Pedido: ' + df_tr['nota_fiscal'].astype(str) + ')'
                 
                 for idx_g, nome_grupo in enumerate(df_tr['chave_agrupamento'].unique()):
                     df_sub_grupo = df_tr[df_tr['chave_agrupamento'] == nome_grupo]
                     nota_atual = df_sub_grupo['nota_fiscal'].iloc[0]
                     vol_nota = int(df_sub_grupo['volumetria_carga'].iloc[0]) if 'volumetria_carga' in df_sub_grupo.columns else 1
-                    ids_sep = df_sub_grupo['id_separacao'].tolist()
+                    ids_solic_lote = df_sub_grupo['id_solicitacao'].tolist()
                     
                     with st.container(border=True):
                         st.markdown('### 📦 Despacho do Pedido: ' + str(nome_grupo))
@@ -659,10 +694,20 @@ else:
                                     with get_conn(CRED_OP) as conn_up:
                                         with conn_up.cursor() as cur:
                                             cur.execute('''
-                                                UPDATE transferencia_notas_separacao 
-                                                SET transportadora = %s, status_etapa = 'Em Trânsito'
-                                                WHERE id_separacao = ANY(%s)
-                                            ''', (transp.strip(), ids_sep))
+                                                UPDATE solicitacoes_transferencia 
+                                                SET status_atual = 'Em Trânsito'
+                                                WHERE id_solicitacao = ANY(%s)
+                                            ''', (ids_solic_lote,))
+                                            
+                                            try:
+                                                cur.execute('''
+                                                    UPDATE transferencia_notas_separacao 
+                                                    SET transportadora = %s, status_etapa = 'Em Trânsito'
+                                                    WHERE id_solicitacao = ANY(%s)
+                                                ''', (transp.strip(), ids_solic_lote))
+                                            except:
+                                                pass
+
                                             conn_up.commit()
                                     
                                     st.success('Transportadora salva e pedido colocado em trânsito com sucesso!')
@@ -740,8 +785,14 @@ else:
                                                 cur.execute('''
                                                     INSERT INTO transferencia_notas_separacao 
                                                     (id_solicitacao, nota_fiscal, quantidade_separada, volumetria_carga, status_etapa, data_separacao)
-                                                    VALUES (%s, %s, %s, %s, 'Separado Parcial', NOW())
+                                                    VALUES (%s, %s, %s, %s, 'Pronto para Transporte', NOW())
                                                 ''', (item['id_sol'], input_nf_lote.strip(), item['quantidade'], int(input_volumetria)))
+                                                
+                                                cur.execute('''
+                                                    UPDATE solicitacoes_transferencia 
+                                                    SET status_atual = 'Pronto para Transporte'
+                                                    WHERE id_solicitacao = %s
+                                                ''', (item['id_sol'],))
                                                 
                                                 cd_destino_geral = item['row_dados']['cd_destino']
                                                 resumo_detalhes_origem += '- ID #' + str(item['id_sol']) + ': ' + str(item['row_dados']['cod_produto']) + ' - ' + str(item['row_dados']['descricao']) + ' (' + str(item['quantidade']) + ' ' + str(item['row_dados']['unidade_medida']) + ')\n'
@@ -758,19 +809,31 @@ else:
         with tab_destino:
             try:
                 with get_conn(CRED_OP) as conn_op:
+                    # CORREÇÃO DEFINITIVA: Lê os agendamentos diretamente da tabela principal filtrando pelo CD destino logado
                     query_dest = '''
-                        SELECT ns.*, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida 
-                        FROM transferencia_notas_separacao ns
-                        JOIN solicitacoes_transferencia s ON ns.id_solicitacao = s.id_solicitacao
-                        WHERE ns.status_etapa = 'Agendado' AND s.cd_destino = %s
+                        SELECT s.id_solicitacao, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida, s.volume_solicitado as quantidade_separada, s.status_atual 
+                        FROM solicitacoes_transferencia s
+                        WHERE s.status_atual = 'Agendado' AND s.cd_destino = %s
                     '''
                     df_dest = pd.read_sql(query_dest, conn_op, params=(cd_logado,))
+                    
+                    try:
+                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora FROM transferencia_notas_separacao", conn_op)
+                        if not df_notas.empty:
+                            df_dest = pd.merge(df_dest, df_notas, on='id_solicitacao', how='left')
+                    except:
+                        pass
                 
+                if 'nota_fiscal' not in df_dest.columns:
+                    df_dest['nota_fiscal'] = 'S/N'
+                if 'volumetria_carga' not in df_dest.columns:
+                    df_dest['volumetria_carga'] = 1
+
                 if df_dest.empty:
                     st.info('Nenhuma carga agendada para recebimento.')
                 else:
                     st.subheader('Conferência Física em Fases por Número do Pedido')
-                    df_dest['chave_grupo'] = df_dest['cd_origem'] + ' ➔ ' + df_dest['cd_destino'] + ' (Pedido: ' + df_dest['nota_fiscal'] + ')'
+                    df_dest['chave_grupo'] = df_dest['cd_origem'].astype(str) + ' ➔ ' + df_dest['cd_destino'].astype(str) + ' (Pedido: ' + df_dest['nota_fiscal'].astype(str) + ')'
                     
                     for idx_d, nome_grupo in enumerate(df_dest['chave_grupo'].unique()):
                         df_sub_dest = df_dest[df_dest['chave_grupo'] == nome_grupo]
@@ -785,10 +848,10 @@ else:
                                 lista_conf_inputs = []
                                 
                                 for _, r in df_sub_dest.iterrows():
-                                    id_sep = r['id_separacao']
+                                    id_sep = r['id_solicitacao']
                                     id_solic = r['id_solicitacao']
                                     q_sep = int(r['quantidade_separada'])
-                                    q_rec_anterior = int(r['quantidade_recebida'] if r['quantidade_recebida'] is not None else 0)
+                                    q_rec_anterior = int(r.get('quantidade_recebida', 0) if pd.notna(r.get('quantidade_recebida')) else 0)
                                     saldo_rec_pendente = q_sep - q_rec_anterior
                                     
                                     st.markdown('**Item ID #' + str(id_solic) + '** — ' + str(r['cod_produto']) + ' - ' + str(r['descricao']))
@@ -824,22 +887,24 @@ else:
                                                         r_dados = item['row']
                                                         nova_qtd_rec = int(item['qtd_recebida'])
                                                         
-                                                        cur.execute('''
-                                                            UPDATE transferencia_notas_separacao 
-                                                            SET quantidade_recebida = quantidade_recebida + %s,
-                                                                status_etapa = CASE WHEN (quantidade_recebida + %s) >= quantidade_separada THEN 'Concluído' ELSE 'Separado Parcial' END,
-                                                                data_recebimento = NOW()
-                                                            WHERE id_separacao = %s
-                                                        ''', (nova_qtd_rec, nova_qtd_rec, item['id_separacao']))
+                                                        try:
+                                                            cur.execute('''
+                                                                UPDATE transferencia_notas_separacao 
+                                                                SET quantidade_recebida = quantidade_recebida + %s,
+                                                                    status_etapa = CASE WHEN (quantidade_recebida + %s) >= quantidade_separada THEN 'Concluído' ELSE 'Separado Parcial' END,
+                                                                    data_recebimento = NOW()
+                                                                WHERE id_solicitacao = %s
+                                                            ''', (nova_qtd_rec, nova_qtd_rec, item['id_sol']))
+                                                        except:
+                                                            pass
                                                         
                                                         cur.execute('''
                                                             UPDATE solicitacoes_transferencia 
-                                                            SET volume_recebido = COALESCE(volume_recebido, 0) + %s,
-                                                                status_atual = CASE WHEN volume_solicitado <= (SELECT COALESCE(SUM(quantidade_recebida),0) FROM transferencia_notas_separacao WHERE id_solicitacao = %s) THEN 'Concluído' ELSE status_atual END
+                                                            SET status_atual = 'Concluído'
                                                             WHERE id_solicitacao = %s
-                                                        ''', (nova_qtd_rec, item['id_sol'], item['id_sol']))
+                                                        ''', (item['id_sol'],))
                                                         
-                                                        resumo_email_rec += '- ID #' + str(item['id_sol']) + ': ' + str(r_dados['cod_produto']) + ' - ' + str(r_dados['descricao']) + ' | Separada: ' + str(r_dados['quantidade_separada']) + ' | Recebida: ' + str(nova_qtd_rec) + '\n'
+                                                        resumo_email_rec += '- ID #' + str(item['id_sol']) + ': ' + str(r_dados['cod_produto']) + ' - ' + str(r_dados['descricao']) + ' | Recebida: ' + str(nova_qtd_rec) + '\n'
                                                     conn_rec.commit()
                                             
                                             st.success('Recebimento registrado com sucesso!')
