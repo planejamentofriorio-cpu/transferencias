@@ -92,6 +92,9 @@ def inicializar_banco_notas():
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transferencia_notas_separacao' and column_name='volumetria_carga') THEN
                             ALTER TABLE transferencia_notas_separacao ADD COLUMN volumetria_carga INT DEFAULT 1;
                         END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transferencia_notas_separacao' and column_name='quantidade_recebida') THEN
+                            ALTER TABLE transferencia_notas_separacao ADD COLUMN quantidade_recebida INT DEFAULT 0;
+                        END IF;
                     END $$;
                 ''')
                 cur.execute('CREATE INDEX IF NOT EXISTS idx_transf_notas_solic ON transferencia_notas_separacao(id_solicitacao);')
@@ -508,7 +511,6 @@ else:
         with tab_agend:
             try:
                 with get_conn(CRED_OP) as conn_op:
-                    # CORREÇÃO: Lê diretamente da tabela principal os itens com status 'Agendado' para a aba do Planejamento
                     df_ag = pd.read_sql('''
                         SELECT id_solicitacao, cod_produto, descricao, unidade_medida, cd_origem, cd_destino, volume_solicitado as quantidade_separada, status_atual 
                         FROM solicitacoes_transferencia 
@@ -809,7 +811,6 @@ else:
         with tab_destino:
             try:
                 with get_conn(CRED_OP) as conn_op:
-                    # CORREÇÃO DEFINITIVA: Lê os agendamentos diretamente da tabela principal filtrando pelo CD destino logado
                     query_dest = '''
                         SELECT s.id_solicitacao, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida, s.volume_solicitado as quantidade_separada, s.status_atual 
                         FROM solicitacoes_transferencia s
@@ -818,27 +819,38 @@ else:
                     df_dest = pd.read_sql(query_dest, conn_op, params=(cd_logado,))
                     
                     try:
-                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora FROM transferencia_notas_separacao", conn_op)
-                        if not df_notas.empty:
-                            df_dest = pd.merge(df_dest, df_notas, on='id_solicitacao', how='left')
+                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora, quantidade_recebida FROM transferencia_notas_separacao", conn_op)
+                        if not df_dest.empty and not df_notas.empty:
+                            df_dest = pd.merge(df_dest, df_notas, on='id_solicitacao', how='left', suffixes=('', '_nota'))
                     except:
                         pass
                 
-                if 'nota_fiscal' not in df_dest.columns:
-                    df_dest['nota_fiscal'] = 'S/N'
-                if 'volumetria_carga' not in df_dest.columns:
-                    df_dest['volumetria_carga'] = 1
-
+                # GARANTIA DE SEGURANÇA PARA EVITAR ERROS DE INDEXAÇÃO POSICIONAL
                 if df_dest.empty:
                     st.info('Nenhuma carga agendada para recebimento.')
                 else:
+                    if 'nota_fiscal' not in df_dest.columns:
+                        df_dest['nota_fiscal'] = 'S/N'
+                    else:
+                        df_dest['nota_fiscal'] = df_dest['nota_fiscal'].fillna('S/N')
+
+                    if 'volumetria_carga' not in df_dest.columns:
+                        df_dest['volumetria_carga'] = 1
+                    else:
+                        df_dest['volumetria_carga'] = df_dest['volumetria_carga'].fillna(1)
+
+                    if 'quantidade_recebida' not in df_dest.columns:
+                        df_dest['quantidade_recebida'] = 0
+                    else:
+                        df_dest['quantidade_recebida'] = df_dest['quantidade_recebida'].fillna(0)
+
                     st.subheader('Conferência Física em Fases por Número do Pedido')
                     df_dest['chave_grupo'] = df_dest['cd_origem'].astype(str) + ' ➔ ' + df_dest['cd_destino'].astype(str) + ' (Pedido: ' + df_dest['nota_fiscal'].astype(str) + ')'
                     
                     for idx_d, nome_grupo in enumerate(df_dest['chave_grupo'].unique()):
                         df_sub_dest = df_dest[df_dest['chave_grupo'] == nome_grupo]
                         nota_fiscal_atual = df_sub_dest['nota_fiscal'].iloc[0]
-                        volumetria_atual = df_sub_dest['volumetria_carga'].iloc[0] if 'volumetria_carga' in df_sub_dest.columns else 1
+                        volumetria_atual = df_sub_dest['volumetria_carga'].iloc[0]
                         
                         with st.container(border=True):
                             st.markdown('### 📥 Recebimento de Carga: ' + str(nome_grupo))
@@ -852,7 +864,7 @@ else:
                                     id_solic = r['id_solicitacao']
                                     q_sep = int(r['quantidade_separada'])
                                     q_rec_anterior = int(r.get('quantidade_recebida', 0) if pd.notna(r.get('quantidade_recebida')) else 0)
-                                    saldo_rec_pendente = q_sep - q_rec_anterior
+                                    saldo_rec_pendente = max(0, q_sep - q_rec_anterior)
                                     
                                     st.markdown('**Item ID #' + str(id_solic) + '** — ' + str(r['cod_produto']) + ' - ' + str(r['descricao']))
                                     c1, c2, c3 = st.columns([4, 2, 2])
@@ -890,8 +902,8 @@ else:
                                                         try:
                                                             cur.execute('''
                                                                 UPDATE transferencia_notas_separacao 
-                                                                SET quantidade_recebida = quantidade_recebida + %s,
-                                                                    status_etapa = CASE WHEN (quantidade_recebida + %s) >= quantidade_separada THEN 'Concluído' ELSE 'Separado Parcial' END,
+                                                                SET quantidade_recebida = COALESCE(quantidade_recebida, 0) + %s,
+                                                                    status_etapa = CASE WHEN (COALESCE(quantidade_recebida, 0) + %s) >= quantidade_separada THEN 'Concluído' ELSE 'Separado Parcial' END,
                                                                     data_recebimento = NOW()
                                                                 WHERE id_solicitacao = %s
                                                             ''', (nova_qtd_rec, nova_qtd_rec, item['id_sol']))
