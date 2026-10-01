@@ -519,30 +519,42 @@ else:
                     
                     try:
                         df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora, observacao FROM transferencia_notas_separacao", conn_op)
-                        if not df_notas.empty:
+                        if not df_ag.empty and not df_notas.empty:
                             df_ag = pd.merge(df_ag, df_notas, on='id_solicitacao', how='left')
                     except:
                         pass
                 
-                if 'nota_fiscal' not in df_ag.columns:
-                    df_ag['nota_fiscal'] = 'S/N'
-                if 'volumetria_carga' not in df_ag.columns:
-                    df_ag['volumetria_carga'] = 1
-                if 'transportadora' not in df_ag.columns:
-                    df_ag['transportadora'] = 'Não informada'
-
                 if df_ag.empty:
                     st.info('Nenhum Número do Pedido aguardando agendamento de doca.')
                 else:
+                    if 'nota_fiscal' not in df_ag.columns:
+                        df_ag['nota_fiscal'] = 'S/N'
+                    else:
+                        df_ag['nota_fiscal'] = df_ag['nota_fiscal'].fillna('S/N')
+
+                    if 'volumetria_carga' not in df_ag.columns:
+                        df_ag['volumetria_carga'] = 1
+                    else:
+                        df_ag['volumetria_carga'] = df_ag['volumetria_carga'].fillna(1)
+
+                    if 'transportadora' not in df_ag.columns:
+                        df_ag['transportadora'] = 'Não informada'
+                    else:
+                        df_ag['transportadora'] = df_ag['transportadora'].fillna('Não informada')
+
                     st.subheader('Controle de Janelas por Número do Pedido')
                     df_ag['chave_agrupamento'] = df_ag['cd_origem'].astype(str) + ' ➔ ' + df_ag['cd_destino'].astype(str) + ' (Pedido: ' + df_ag['nota_fiscal'].astype(str) + ')'
                     
                     for idx_g, nome_grupo in enumerate(df_ag['chave_agrupamento'].unique()):
                         df_sub_ag = df_ag[df_ag['chave_agrupamento'] == nome_grupo]
+                        
+                        if df_sub_ag.empty:
+                            continue
+                            
                         transp_v = df_sub_ag['transportadora'].iloc[0]
                         cd_dest = df_sub_ag['cd_destino'].iloc[0]
                         nota_atual = df_sub_ag['nota_fiscal'].iloc[0]
-                        vol_atual = df_sub_ag['volumetria_carga'].iloc[0] if 'volumetria_carga' in df_sub_ag.columns else 1
+                        vol_atual = df_sub_ag['volumetria_carga'].iloc[0] if pd.notna(df_sub_ag['volumetria_carga'].iloc[0]) else 1
                         ids_sep = df_sub_ag['id_solicitacao'].tolist()
                         
                         with st.container(border=True):
@@ -555,7 +567,7 @@ else:
                                 hr_ag = col_h.text_input('Horário (Ex: 08:30)', key='hag_g_' + str(idx_g))
                                 
                                 if st.form_submit_button('🔒 Confirmar Janela de Entrega', use_container_width=True):
-                                    if hr_ag.strip() == '':
+                                    if not hr_ag.strip():
                                         st.error('Informe o horário.')
                                     else:
                                         with get_conn(CRED_OP) as conn_up:
@@ -654,26 +666,35 @@ else:
                 
                 try:
                     df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora FROM transferencia_notas_separacao", conn_op)
-                    if not df_notas.empty:
+                    if not df_tr.empty and not df_notas.empty:
                         df_tr = pd.merge(df_tr, df_notas, on='id_solicitacao', how='left')
                 except:
                     pass
             
-            if 'nota_fiscal' not in df_tr.columns:
-                df_tr['nota_fiscal'] = 'S/N'
-            if 'volumetria_carga' not in df_tr.columns:
-                df_tr['volumetria_carga'] = 1
-
             if df_tr.empty:
                 st.info('Sem pedidos aguardando despacho e cotação no momento.')
             else:
+                if 'nota_fiscal' not in df_tr.columns:
+                    df_tr['nota_fiscal'] = 'S/N'
+                else:
+                    df_tr['nota_fiscal'] = df_tr['nota_fiscal'].fillna('S/N')
+
+                if 'volumetria_carga' not in df_tr.columns:
+                    df_tr['volumetria_carga'] = 1
+                else:
+                    df_tr['volumetria_carga'] = df_tr['volumetria_carga'].fillna(1)
+
                 st.subheader('Fila de Pedidos Prontos para Despacho e Atribuição de Transportadora')
                 df_tr['chave_agrupamento'] = df_tr['cd_origem'].astype(str) + ' ➔ ' + df_tr['cd_destino'].astype(str) + ' (Pedido: ' + df_tr['nota_fiscal'].astype(str) + ')'
                 
                 for idx_g, nome_grupo in enumerate(df_tr['chave_agrupamento'].unique()):
                     df_sub_grupo = df_tr[df_tr['chave_agrupamento'] == nome_grupo]
+                    
+                    if df_sub_grupo.empty:
+                        continue
+                        
                     nota_atual = df_sub_grupo['nota_fiscal'].iloc[0]
-                    vol_nota = int(df_sub_grupo['volumetria_carga'].iloc[0]) if 'volumetria_carga' in df_sub_grupo.columns else 1
+                    vol_nota = int(df_sub_grupo['volumetria_carga'].iloc[0]) if pd.notna(df_sub_grupo['volumetria_carga'].iloc[0]) else 1
                     ids_solic_lote = df_sub_grupo['id_solicitacao'].tolist()
                     
                     with st.container(border=True):
@@ -690,7 +711,7 @@ else:
                             dt_p = col_d.date_input('Previsão de Chegada', key='dtp_g_' + str(idx_g))
                             
                             if st.form_submit_button('🚀 Salvar Transportadora e Colocar Em Trânsito', type='primary', use_container_width=True):
-                                if transp.strip() == '':
+                                if not transp.strip():
                                     st.error('Informe a transportadora.')
                                 else:
                                     with get_conn(CRED_OP) as conn_up:
@@ -825,7 +846,6 @@ else:
                     except:
                         pass
                 
-                # GARANTIA DE SEGURANÇA PARA EVITAR ERROS DE INDEXAÇÃO POSICIONAL
                 if df_dest.empty:
                     st.info('Nenhuma carga agendada para recebimento.')
                 else:
@@ -849,6 +869,10 @@ else:
                     
                     for idx_d, nome_grupo in enumerate(df_dest['chave_grupo'].unique()):
                         df_sub_dest = df_dest[df_dest['chave_grupo'] == nome_grupo]
+                        
+                        if df_sub_dest.empty:
+                            continue
+                            
                         nota_fiscal_atual = df_sub_dest['nota_fiscal'].iloc[0]
                         volumetria_atual = df_sub_dest['volumetria_carga'].iloc[0]
                         
