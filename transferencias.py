@@ -180,16 +180,11 @@ def email_modulo_3_resumido(rota, nota_fiscal, volumetria_nota, total_itens, res
     corpo = 'Dados de Volumetria e Número do Pedido Disponíveis para Cotação\n\n- Rota: ' + str(rota) + '\n- Número do Pedido: ' + str(nota_fiscal) + '\n- Volumetria da Carga: ' + str(volumetria_nota) + ' volumes\n- Quantidade de Itens no Pedido: ' + str(total_itens) + '\n\nComposicao:\n' + str(resumo_texto)
     disparar_email(EMAIL_TRANSPORTES, assunto, corpo)
 
-def email_modulo_4_resumido(rota, transportadora, data_prevista, nota_fiscal, volumetria_nota):
-    assunto = '🚀 Módulo 4: Número do Pedido ' + str(nota_fiscal) + ' da Rota ' + str(rota) + ' Em Trânsito'
-    corpo = 'Número do Pedido Despachado\n\nA carga referente ao Número do Pedido **' + str(nota_fiscal) + '** da rota **' + str(rota) + '** contendo **' + str(volumetria_nota) + ' volumes** foi despachada via **' + str(transportadora) + '**. Previsao: ' + data_prevista.strftime('%d/%m/%Y')
-    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
-
-def email_modulo_5_resumido(rota, cd_destino, data_agenda, hora_agenda, nota_fiscal):
+def email_modulo_4_resumido(rota, cd_destino, transportadora, data_prevista, nota_fiscal, volumetria_nota):
     email_destinatario = obter_emails_destinatarios(cd_destino)
-    assunto = '📅 Módulo 5: Recebimento Agendado do Pedido ' + str(nota_fiscal) + ' — Rota ' + str(rota)
-    corpo = 'Janela de Doca Marcada\n\nO Número do Pedido **' + str(nota_fiscal) + '** da rota **' + str(rota) + '** foi agendado para o dia **' + data_agenda.strftime('%d/%m/%Y') + '** as **' + str(hora_agenda) + '**.'
-    disparar_email(email_destinatario, assunto, corpo)
+    assunto = '🚀 Módulo 4: Pedido ' + str(nota_fiscal) + ' da Rota ' + str(rota) + ' Em Trânsito (Previsão: ' + data_prevista.strftime('%d/%m/%Y') + ')'
+    corpo = 'Número do Pedido Despachado\n\nA carga referente ao Número do Pedido **' + str(nota_fiscal) + '** da rota **' + str(rota) + '** contendo **' + str(volumetria_nota) + ' volumes** foi despachada via **' + str(transportadora) + '**. Previsão de chegada ao CD: ' + data_prevista.strftime('%d/%m/%Y') + '.\n\nO pedido já está disponível no painel do CD de Destino para conferência.'
+    disparar_email([EMAIL_PLANEJAMENTO] + email_destinatario, assunto, corpo)
 
 def email_lote_concluido(nome_grupo, nota_fiscal, resumo_texto):
     assunto = '✅ RECEBIMENTO CONCLUÍDO: Número do Pedido ' + str(nota_fiscal) + ' — ' + str(nome_grupo)
@@ -421,7 +416,7 @@ else:
 
     elif st.session_state.depto == 'Planejamento':
         st.header('📊 Módulo de Planejamento - Avaliação de Demandas')
-        tab_aprov, tab_agend, tab_cancelar = st.tabs(['📋 Aprovar Linhas (Lote)', '📅 Agendar Janelas de Doca', '🗑️ Gerenciar e Cancelar Transferências'])
+        tab_aprov, tab_cancelar = st.tabs(['📋 Aprovar Linhas (Lote)', '🗑️ Gerenciar e Cancelar Transferências'])
         
         with tab_aprov:
             try:
@@ -507,92 +502,6 @@ else:
                                     st.rerun()
             except Exception as e:
                 st.error('Erro na aprovação: ' + str(e))
-
-        with tab_agend:
-            try:
-                with get_conn(CRED_OP) as conn_op:
-                    df_ag = pd.read_sql('''
-                        SELECT id_solicitacao, cod_produto, descricao, unidade_medida, cd_origem, cd_destino, volume_solicitado as quantidade_separada, status_atual 
-                        FROM solicitacoes_transferencia 
-                        WHERE status_atual = 'Agendado'
-                    ''', conn_op)
-                    
-                    try:
-                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora, observacao FROM transferencia_notas_separacao", conn_op)
-                        if not df_ag.empty and not df_notas.empty:
-                            df_ag = pd.merge(df_ag, df_notas, on='id_solicitacao', how='left')
-                    except:
-                        pass
-                
-                if df_ag.empty:
-                    st.info('Nenhum Número do Pedido aguardando agendamento de doca.')
-                else:
-                    if 'nota_fiscal' not in df_ag.columns:
-                        df_ag['nota_fiscal'] = 'S/N'
-                    else:
-                        df_ag['nota_fiscal'] = df_ag['nota_fiscal'].fillna('S/N')
-
-                    if 'volumetria_carga' not in df_ag.columns:
-                        df_ag['volumetria_carga'] = 1
-                    else:
-                        df_ag['volumetria_carga'] = df_ag['volumetria_carga'].fillna(1)
-
-                    if 'transportadora' not in df_ag.columns:
-                        df_ag['transportadora'] = 'Não informada'
-                    else:
-                        df_ag['transportadora'] = df_ag['transportadora'].fillna('Não informada')
-
-                    st.subheader('Controle de Janelas por Número do Pedido')
-                    df_ag['chave_agrupamento'] = df_ag['cd_origem'].astype(str) + ' ➔ ' + df_ag['cd_destino'].astype(str) + ' (Pedido: ' + df_ag['nota_fiscal'].astype(str) + ')'
-                    
-                    for idx_g, nome_grupo in enumerate(df_ag['chave_agrupamento'].unique()):
-                        df_sub_ag = df_ag[df_ag['chave_agrupamento'] == nome_grupo]
-                        
-                        if df_sub_ag.empty:
-                            continue
-                            
-                        transp_v = df_sub_ag['transportadora'].iloc[0]
-                        cd_dest = df_sub_ag['cd_destino'].iloc[0]
-                        nota_atual = df_sub_ag['nota_fiscal'].iloc[0]
-                        vol_atual = df_sub_ag['volumetria_carga'].iloc[0] if pd.notna(df_sub_ag['volumetria_carga'].iloc[0]) else 1
-                        ids_sep = df_sub_ag['id_solicitacao'].tolist()
-                        
-                        with st.container(border=True):
-                            st.markdown('### 📅 Agendamento de Doca: ' + str(nome_grupo))
-                            st.markdown('**Transportadora:** ' + str(transp_v) + ' | **Número do Pedido:** ' + str(nota_atual) + ' | **Volumetria:** ' + str(vol_atual) + ' volumes')
-                            
-                            with st.form('form_agenda_grupo_' + str(idx_g)):
-                                col_d, col_h = st.columns(2)
-                                dt_ag = col_d.date_input('Data para Descarregamento', key='dag_g_' + str(idx_g))
-                                hr_ag = col_h.text_input('Horário (Ex: 08:30)', key='hag_g_' + str(idx_g))
-                                
-                                if st.form_submit_button('🔒 Confirmar Janela de Entrega', use_container_width=True):
-                                    if not hr_ag.strip():
-                                        st.error('Informe o horário.')
-                                    else:
-                                        with get_conn(CRED_OP) as conn_up:
-                                            with conn_up.cursor() as cur:
-                                                cur.execute('''
-                                                    UPDATE solicitacoes_transferencia 
-                                                    SET status_atual = 'Agendado'
-                                                    WHERE id_solicitacao = ANY(%s)
-                                                ''', (ids_sep,))
-                                                
-                                                try:
-                                                    cur.execute('''
-                                                        UPDATE transferencia_notas_separacao 
-                                                        SET status_etapa = 'Agendado', observacao = CONCAT(COALESCE(observacao, ''), ' | Janela: ', %s, ' às ', %s)
-                                                        WHERE id_solicitacao = ANY(%s)
-                                                    ''', (str(dt_ag), hr_ag.strip(), ids_sep))
-                                                except:
-                                                    pass
-
-                                            conn_up.commit()
-                                        st.success('Janela salva!')
-                                        email_modulo_5_resumido(nome_grupo, cd_dest, dt_ag, hr_ag.strip(), nota_atual)
-                                        st.rerun()
-            except Exception as e:
-                st.error('Erro no agendamento: ' + str(e))
 
         with tab_cancelar:
             st.subheader('🗑️ Gestão e Cancelamento de Transferências (Exclusivo Planejamento)')
@@ -695,6 +604,7 @@ else:
                         
                     nota_atual = df_sub_grupo['nota_fiscal'].iloc[0]
                     vol_nota = int(df_sub_grupo['volumetria_carga'].iloc[0]) if pd.notna(df_sub_grupo['volumetria_carga'].iloc[0]) else 1
+                    cd_dest_grupo = df_sub_grupo['cd_destino'].iloc[0]
                     ids_solic_lote = df_sub_grupo['id_solicitacao'].tolist()
                     
                     with st.container(border=True):
@@ -708,33 +618,34 @@ else:
                         with st.form('form_despacho_grupo_' + str(idx_g)):
                             col_t, col_d = st.columns(2)
                             transp = col_t.text_input('Transportadora cotada / Motorista', key='tname_g_' + str(idx_g))
-                            dt_p = col_d.date_input('Previsão de Chegada', key='dtp_g_' + str(idx_g))
+                            dt_p = col_d.date_input('Previsão de Chegada ao CD Destino', key='dtp_g_' + str(idx_g))
                             
-                            if st.form_submit_button('🚀 Salvar Transportadora e Colocar Em Trânsito', type='primary', use_container_width=True):
+                            if st.form_submit_button('🚀 Salvar e Enviar Direto para o CD Destino', type='primary', use_container_width=True):
                                 if not transp.strip():
                                     st.error('Informe a transportadora.')
                                 else:
                                     with get_conn(CRED_OP) as conn_up:
                                         with conn_up.cursor() as cur:
+                                            # Altera o status direto para 'Agendado' (liberando direto para o CD destino conferir)
                                             cur.execute('''
                                                 UPDATE solicitacoes_transferencia 
-                                                SET status_atual = 'Em Trânsito'
+                                                SET status_atual = 'Agendado'
                                                 WHERE id_solicitacao = ANY(%s)
                                             ''', (ids_solic_lote,))
                                             
                                             try:
                                                 cur.execute('''
                                                     UPDATE transferencia_notas_separacao 
-                                                    SET transportadora = %s, status_etapa = 'Em Trânsito'
+                                                    SET transportadora = %s, status_etapa = 'Agendado', observacao = CONCAT(COALESCE(observacao, ''), ' | Previsão Chegada: ', %s)
                                                     WHERE id_solicitacao = ANY(%s)
-                                                ''', (transp.strip(), ids_solic_lote))
+                                                ''', (transp.strip(), str(dt_p), ids_solic_lote))
                                             except:
                                                 pass
 
                                             conn_up.commit()
                                     
-                                    st.success('Transportadora salva e pedido colocado em trânsito com sucesso!')
-                                    email_modulo_4_resumido(nome_grupo, transp.strip(), dt_p, nota_atual, vol_nota)
+                                    st.success('Transportadora salva e pedido enviado diretamente para o CD de Destino!')
+                                    email_modulo_4_resumido(nome_grupo, cd_dest_grupo, transp.strip(), dt_p, nota_atual, vol_nota)
                                     st.rerun()
         except Exception as e:
             st.error('Erro no módulo de transportes: ' + str(e))
@@ -840,14 +751,14 @@ else:
                     df_dest = pd.read_sql(query_dest, conn_op, params=(cd_logado,))
                     
                     try:
-                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora, quantidade_recebida FROM transferencia_notas_separacao", conn_op)
+                        df_notas = pd.read_sql("SELECT id_solicitacao, nota_fiscal, volumetria_carga, transportadora, quantidade_recebida, observacao FROM transferencia_notas_separacao", conn_op)
                         if not df_dest.empty and not df_notas.empty:
                             df_dest = pd.merge(df_dest, df_notas, on='id_solicitacao', how='left', suffixes=('', '_nota'))
                     except:
                         pass
                 
                 if df_dest.empty:
-                    st.info('Nenhuma carga agendada para recebimento.')
+                    st.info('Nenhuma carga em trânsito ou aguardando conferência no momento.')
                 else:
                     if 'nota_fiscal' not in df_dest.columns:
                         df_dest['nota_fiscal'] = 'S/N'
@@ -864,6 +775,11 @@ else:
                     else:
                         df_dest['quantidade_recebida'] = df_dest['quantidade_recebida'].fillna(0)
 
+                    if 'transportadora' not in df_dest.columns:
+                        df_dest['transportadora'] = 'Não informada'
+                    else:
+                        df_dest['transportadora'] = df_dest['transportadora'].fillna('Não informada')
+
                     st.subheader('Conferência Física em Fases por Número do Pedido')
                     df_dest['chave_grupo'] = df_dest['cd_origem'].astype(str) + ' ➔ ' + df_dest['cd_destino'].astype(str) + ' (Pedido: ' + df_dest['nota_fiscal'].astype(str) + ')'
                     
@@ -875,10 +791,13 @@ else:
                             
                         nota_fiscal_atual = df_sub_dest['nota_fiscal'].iloc[0]
                         volumetria_atual = df_sub_dest['volumetria_carga'].iloc[0]
+                        transp_atual = df_sub_dest['transportadora'].iloc[0]
+                        obs_atual = df_sub_dest['observacao'].iloc[0] if 'observacao' in df_sub_dest.columns and pd.notna(df_sub_dest['observacao'].iloc[0]) else 'Sem observações'
                         
                         with st.container(border=True):
-                            st.markdown('### 📥 Recebimento de Carga: ' + str(nome_grupo))
-                            st.caption('🚛 **Número do Pedido:** ' + str(nota_fiscal_atual) + ' | 📦 **Volumetria:** ' + str(volumetria_atual) + ' volumes')
+                            st.markdown('### 📥 Conferência de Carga: ' + str(nome_grupo))
+                            st.caption('🚛 **Número do Pedido:** ' + str(nota_fiscal_atual) + ' | 📦 **Volumetria:** ' + str(volumetria_atual) + ' volumes | 🏢 **Transportadora:** ' + str(transp_atual))
+                            st.text('Detalhes / Previsão: ' + str(obs_atual))
                             
                             with st.form('form_recebimento_fase_' + str(idx_d)):
                                 lista_conf_inputs = []
