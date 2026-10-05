@@ -1,4 +1,4 @@
-import streamlit as st
+import streamlit as str_lit
 import pandas as pd
 import psycopg2
 from psycopg2 import extras
@@ -7,6 +7,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import traceback
+
+# Para manter o alias padrão usado no script
+st = str_lit
 
 CRED_OP = {
     'host': 'aws-0-sa-east-1.pooler.supabase.com',
@@ -182,8 +185,8 @@ def email_modulo_3_resumido(rota, nota_fiscal, volumetria_nota, total_itens, res
 
 def email_modulo_4_resumido(rota, cd_destino, transportadora, data_prevista, nota_fiscal, volumetria_nota):
     email_destinatario = obter_emails_destinatarios(cd_destino)
-    assunto = '🚀 Módulo 4: Pedido ' + str(nota_fiscal) + ' da Rota ' + str(rota) + ' Em Trânsito (Previsão: ' + data_prevista.strftime('%d/%m/%Y') + ')'
-    corpo = 'Número do Pedido Despachado\n\nA carga referente ao Número do Pedido **' + str(nota_fiscal) + '** da rota **' + str(rota) + '** contendo **' + str(volumetria_nota) + ' volumes** foi despachada via **' + str(transportadora) + '**. Previsão de chegada ao CD: ' + data_prevista.strftime('%d/%m/%Y') + '.\n\nO pedido já está disponível no painel do CD de Destino para conferência.'
+    assunto = '🚀 Módulo 4: Carga Consolidada da Rota ' + str(rota) + ' Em Trânsito (Previsão: ' + data_prevista.strftime('%d/%m/%Y') + ')'
+    corpo = 'Carga Despachada pelo Transporte\n\nA carga consolidada da rota **' + str(rota) + '** contendo **' + str(volumetria_nota) + ' volumes** foi despachada via **' + str(transportadora) + '**. Previsão de chegada ao CD: ' + data_prevista.strftime('%d/%m/%Y') + '.\n\nO pedido já está disponível no painel do CD de Destino para conferência.'
     disparar_email([EMAIL_PLANEJAMENTO] + email_destinatario, assunto, corpo)
 
 def email_lote_concluido(nome_grupo, nota_fiscal, resumo_texto):
@@ -583,50 +586,56 @@ else:
             if df_tr.empty:
                 st.info('Sem pedidos aguardando despacho e cotação no momento.')
             else:
-                if 'nota_fiscal' not in df_tr.columns:
-                    df_tr['nota_fiscal'] = 'S/N'
-                else:
-                    df_tr['nota_fiscal'] = df_tr['nota_fiscal'].fillna('S/N')
-
                 if 'volumetria_carga' not in df_tr.columns:
                     df_tr['volumetria_carga'] = 1
                 else:
                     df_tr['volumetria_carga'] = df_tr['volumetria_carga'].fillna(1)
 
-                st.subheader('Fila de Pedidos Prontos para Despacho e Atribuição de Transportadora')
-                df_tr['chave_agrupamento'] = df_tr['cd_origem'].astype(str) + ' ➔ ' + df_tr['cd_destino'].astype(str) + ' (Pedido: ' + df_tr['nota_fiscal'].astype(str) + ')'
+                st.subheader('Fila de Cargas Agrupadas por Rota (Origem ➔ Destino)')
                 
-                for idx_g, nome_grupo in enumerate(df_tr['chave_agrupamento'].unique()):
-                    df_sub_grupo = df_tr[df_tr['chave_agrupamento'] == nome_grupo]
+                # Agrupamento estrito por Origem e Destino
+                df_tr['rota'] = df_tr['cd_origem'].astype(str) + ' ➔ ' + df_tr['cd_destino'].astype(str)
+                
+                for idx_g, rota_nome in enumerate(df_tr['rota'].unique()):
+                    df_sub_grupo = df_tr[df_tr['rota'] == rota_nome]
                     
                     if df_sub_grupo.empty:
                         continue
                         
-                    nota_atual = df_sub_grupo['nota_fiscal'].iloc[0]
-                    vol_nota = int(df_sub_grupo['volumetria_carga'].iloc[0]) if pd.notna(df_sub_grupo['volumetria_carga'].iloc[0]) else 1
+                    cd_orig_grupo = df_sub_grupo['cd_origem'].iloc[0]
                     cd_dest_grupo = df_sub_grupo['cd_destino'].iloc[0]
-                    ids_solic_lote = df_sub_grupo['id_solicitacao'].tolist()
+                    
+                    # Somatória dos dados para a rota
+                    total_qtd_rota = df_sub_grupo['quantidade_separada'].sum()
+                    total_itens_rota = len(df_sub_grupo)
+                    total_volumes_rota = df_sub_grupo['volumetria_carga'].sum() if 'volumetria_carga' in df_sub_grupo.columns else total_itens_rota
                     
                     with st.container(border=True):
-                        st.markdown('### 📦 Despacho do Pedido: ' + str(nome_grupo))
-                        st.markdown('**Número do Pedido:** ' + str(nota_atual) + ' | **Volumetria da Carga:** **' + str(vol_nota) + ' volumes**')
+                        st.markdown(f'### 📦 Rota Consolidada: {rota_nome}')
                         
-                        st.write('**Itens contemplados:**')
+                        col_m1, col_m2, col_m3 = st.columns(3)
+                        col_m1.metric('Total de Solicitações', total_itens_rota)
+                        col_m2.metric('Somatória de Quantidades', f'{total_qtd_rota:,}')
+                        col_m3.metric('Volumetria Total', f'{int(total_volumes_rota)} volumes')
+                        
+                        st.write('**Itens contemplados nesta rota:**')
                         for _, row_item in df_sub_grupo.iterrows():
-                            st.markdown('- ID #' + str(row_item['id_solicitacao']) + ': ' + str(row_item['cod_produto']) + ' - ' + str(row_item['descricao']) + ' (**' + str(row_item['quantidade_separada']) + ' ' + str(row_item['unidade_medida']) + '**)')
+                            nota_item = row_item['nota_fiscal'] if 'nota_fiscal' in row_item and pd.notna(row_item['nota_fiscal']) else 'S/N'
+                            st.markdown(f'- ID #{row_item["id_solicitacao"]} (Pedido/NF: {nota_item}): {row_item["cod_produto"]} - {row_item["descricao"]} (**{row_item["quantidade_separada"]} {row_item["unidade_medida"]}**)')
                         
-                        with st.form('form_despacho_grupo_' + str(idx_g)):
+                        ids_solic_lote = df_sub_grupo['id_solicitacao'].tolist()
+                        
+                        with st.form('form_despacho_rota_' + str(idx_g)):
                             col_t, col_d = st.columns(2)
                             transp = col_t.text_input('Transportadora cotada / Motorista', key='tname_g_' + str(idx_g))
                             dt_p = col_d.date_input('Previsão de Chegada ao CD Destino', key='dtp_g_' + str(idx_g))
                             
-                            if st.form_submit_button('🚀 Salvar e Enviar Direto para o CD Destino', type='primary', use_container_width=True):
+                            if st.form_submit_button('🚀 Salvar Cotação, Despachar e Enviar para o CD Destino', type='primary', use_container_width=True):
                                 if not transp.strip():
                                     st.error('Informe a transportadora.')
                                 else:
                                     with get_conn(CRED_OP) as conn_up:
                                         with conn_up.cursor() as cur:
-                                            # Altera o status direto para 'Agendado' (liberando direto para o CD destino conferir)
                                             cur.execute('''
                                                 UPDATE solicitacoes_transferencia 
                                                 SET status_atual = 'Agendado'
@@ -644,8 +653,8 @@ else:
 
                                             conn_up.commit()
                                     
-                                    st.success('Transportadora salva e pedido enviado diretamente para o CD de Destino!')
-                                    email_modulo_4_resumido(nome_grupo, cd_dest_grupo, transp.strip(), dt_p, nota_atual, vol_nota)
+                                    st.success('Carga consolidada despachada e enviada diretamente para o CD de Destino!')
+                                    email_modulo_4_resumido(rota_nome, cd_dest_grupo, transp.strip(), dt_p, "Consolidado Rota", int(total_volumes_rota))
                                     st.rerun()
         except Exception as e:
             st.error('Erro no módulo de transportes: ' + str(e))
