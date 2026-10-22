@@ -1,4 +1,4 @@
-import streamlit as str_lit
+import streamlit as st
 import pandas as pd
 import psycopg2
 from psycopg2 import extras
@@ -7,9 +7,6 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import traceback
-
-# Para manter o alias padrão usado no script
-st = str_lit
 
 CRED_OP = {
     'host': 'aws-0-sa-east-1.pooler.supabase.com',
@@ -593,7 +590,6 @@ else:
 
                 st.subheader('Fila de Cargas Agrupadas por Rota (Origem ➔ Destino)')
                 
-                # Agrupamento estrito por Origem e Destino
                 df_tr['rota'] = df_tr['cd_origem'].astype(str) + ' ➔ ' + df_tr['cd_destino'].astype(str)
                 
                 for idx_g, rota_nome in enumerate(df_tr['rota'].unique()):
@@ -605,7 +601,6 @@ else:
                     cd_orig_grupo = df_sub_grupo['cd_origem'].iloc[0]
                     cd_dest_grupo = df_sub_grupo['cd_destino'].iloc[0]
                     
-                    # Somatória dos dados para a rota
                     total_qtd_rota = df_sub_grupo['quantidade_separada'].sum()
                     total_itens_rota = len(df_sub_grupo)
                     total_volumes_rota = df_sub_grupo['volumetria_carga'].sum() if 'volumetria_carga' in df_sub_grupo.columns else total_itens_rota
@@ -804,9 +799,9 @@ else:
                         obs_atual = df_sub_dest['observacao'].iloc[0] if 'observacao' in df_sub_dest.columns and pd.notna(df_sub_dest['observacao'].iloc[0]) else 'Sem observações'
                         
                         with st.container(border=True):
-                            st.markdown('### 📥 Conferência de Carga: ' + str(nome_grupo))
-                            st.caption('🚛 **Número do Pedido:** ' + str(nota_fiscal_atual) + ' | 📦 **Volumetria:** ' + str(volumetria_atual) + ' volumes | 🏢 **Transportadora:** ' + str(transp_atual))
-                            st.text('Detalhes / Previsão: ' + str(obs_atual))
+                            st.markdown(f'### 📥 Conferência de Carga: {nome_grupo}')
+                            st.caption(f'🚛 **Número do Pedido:** {nota_fiscal_atual} | 📦 **Volumetria:** {volumetria_atual} volumes | 🏢 **Transportadora:** {transp_atual}')
+                            st.text(f'Detalhes / Previsão: {obs_atual}')
                             
                             with st.form('form_recebimento_fase_' + str(idx_d)):
                                 lista_conf_inputs = []
@@ -818,12 +813,14 @@ else:
                                     q_rec_anterior = int(r.get('quantidade_recebida', 0) if pd.notna(r.get('quantidade_recebida')) else 0)
                                     saldo_rec_pendente = max(0, q_sep - q_rec_anterior)
                                     
-                                    st.markdown('**Item ID #' + str(id_solic) + '** — ' + str(r['cod_produto']) + ' - ' + str(r['descricao']))
+                                    st.markdown(f'**Item ID #{id_solic}** — {r["cod_produto"]} - {r["descricao"]}')
                                     c1, c2, c3 = st.columns([4, 2, 2])
-                                    c1.write('Separado no Pedido: **' + str(q_sep) + '** ' + str(r['unidade_medida']))
+                                    c1.write(f'Separado no Pedido: **{q_sep}** {r["unidade_medida"]}')
                                     
                                     chk_conf = c2.checkbox('Conferir', key='chk_fase_' + str(id_sep))
-                                    q_recebe_agora = c3.number_input('Qtd Recebida Agora', min_value=0, max_value=int(q_sep), value=int(saldo_rec_pendente), key='qrec_fase_' + str(id_sep))
+                                    
+                                    # CAMPO SEM LIMITE MÁXIMO (permite informar quantidade superior se necessário)
+                                    q_recebe_agora = c3.number_input('Qtd Recebida Agora', min_value=0, value=int(saldo_rec_pendente), key='qrec_fase_' + str(id_sep))
                                     
                                     lista_conf_inputs.append({
                                         'id_separacao': id_sep, 'id_sol': id_solic, 'conferido': chk_conf, 'qtd_recebida': q_recebe_agora, 'row': r
@@ -839,7 +836,7 @@ else:
                                         val_ok = True
                                         for item in lista_conf_inputs:
                                             if not item['conferido']:
-                                                st.error('Confirme o item ID #' + str(item['id_sol']) + '.')
+                                                st.error(f'Confirme o item ID #{item["id_sol"]}.')
                                                 val_ok = False
                                         
                                         if val_ok:
@@ -868,7 +865,7 @@ else:
                                                             WHERE id_solicitacao = %s
                                                         ''', (item['id_sol'],))
                                                         
-                                                        resumo_email_rec += '- ID #' + str(item['id_sol']) + ': ' + str(r_dados['cod_produto']) + ' - ' + str(r_dados['descricao']) + ' | Recebida: ' + str(nova_qtd_rec) + '\n'
+                                                        resumo_email_rec += f'- ID #{item["id_sol"]}: {r_dados["cod_produto"]} - {r_dados["descricao"]} | Recebida: {nova_qtd_rec}\n'
                                                     conn_rec.commit()
                                             
                                             st.success('Recebimento registrado com sucesso!')
