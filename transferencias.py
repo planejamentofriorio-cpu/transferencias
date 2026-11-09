@@ -32,7 +32,15 @@ SMTP_USER = 'luis.bedeschi@friorio.com.br'
 SMTP_PASSWORD = 'Cliffburton1982!'
 
 EMAIL_PLANEJAMENTO = 'planejamento@friorio.com.br'
-EMAIL_COMPRAS      = 'conrado@friorio.com.br'  
+
+# Mapeamento individual de Compras (Por Nome do Usuário no Banco)
+MAP_EMAILS_COMPRAS = {
+    'Comprador 01': 'conrado@friorio.com.br',
+    'Comprador 02': 'fernanda.lumertz@friorio.com.br',
+    'Comprador 03': 'jones.mauricio@friorio.com.br'
+}
+EMAIL_COMPRAS_PADRAO = list(MAP_EMAILS_COMPRAS.values())
+
 EMAIL_TRANSPORTES  = ['bruna.nogueira@friorio.com.br', 'rubens.souza@friorio.com.br']
 
 MAP_EMAILS_CDS = {
@@ -41,7 +49,7 @@ MAP_EMAILS_CDS = {
     '06 - São Paulo': ['fernando.brito@friorio.com.br', 'fabian.nahuel@friorio.com.br', 'planejamento@friorio.com.br']    
 }
 
-TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO, EMAIL_COMPRAS]
+TODOS_ENVOLVIDOS = [EMAIL_PLANEJAMENTO] + EMAIL_COMPRAS_PADRAO
 if isinstance(EMAIL_TRANSPORTES, list):
     TODOS_ENVOLVIDOS.extend(EMAIL_TRANSPORTES)
 else:
@@ -105,6 +113,11 @@ def inicializar_banco_notas():
 
 inicializar_banco_notas()
 
+def obter_email_comprador(nome_criado_por):
+    if nome_criado_por in MAP_EMAILS_COMPRAS:
+        return MAP_EMAILS_COMPRAS[nome_criado_por]
+    return EMAIL_COMPRAS_PADRAO
+
 def obter_emails_destinatarios(cd_nome):
     if not cd_nome:
         return [EMAIL_PLANEJAMENTO]
@@ -155,25 +168,43 @@ def disparar_email(destinatarios, assunto, corpo_texto):
         }
         return False
 
-def email_modulo_1_multi(id_ordem, resumo_texto, rota, total_itens):
+def email_modulo_1_multi(id_ordem, resumo_texto, rota, total_itens, comprador_nome):
+    email_comprador = obter_email_comprador(comprador_nome)
     assunto = '🟡 Módulo 1: Nova Solicitação de Ordem de Carga Multi-Itens #' + str(id_ordem)
-    corpo = 'Nova Demanda de Transferencia Criada\n\nO setor de Compras inseriu uma nova ordem de carga.\n- ID de Controle: #' + str(id_ordem) + '\n- Rota Comercial: ' + str(rota) + '\n- Total de Itens: ' + str(total_itens) + '\n\nItens Solicitados:\n' + str(resumo_texto)
-    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
+    corpo = f'Nova Demanda de Transferencia Criada por {comprador_nome}\n\nO setor de Compras inseriu uma nova ordem de carga.\n- ID de Controle: #' + str(id_ordem) + '\n- Rota Comercial: ' + str(rota) + '\n- Total de Itens: ' + str(total_itens) + '\n\nItens Solicitados:\n' + str(resumo_texto)
+    disparar_email([EMAIL_PLANEJAMENTO, email_comprador], assunto, corpo)
 
-def email_item_revisado_planejamento(id_solic, produto, rota, nova_qtd, justificativa):
-    assunto = '🔄 Item #' + str(id_solic) + ' REVISADO por Compras'
+def email_item_revisado_planejamento(id_solic, produto, rota, nova_qtd, justificativa, comprador_nome):
+    email_comprador = obter_email_comprador(comprador_nome)
+    assunto = '🔄 Item #' + str(id_solic) + ' REVISADO por Compras (' + str(comprador_nome) + ')'
     corpo = 'Item Recusado Corrigido\n\nO comprador revisou os parametros do item abaixo:\n- ID da Solicitacao: #' + str(id_solic) + '\n- Produto: ' + str(produto) + '\n- Rota: ' + str(rota) + '\n- Nova Quantidade: ' + str(nova_qtd) + '\n- Justificativa: ' + str(justificativa)
-    disparar_email(EMAIL_PLANEJAMENTO, assunto, corpo)
+    disparar_email([EMAIL_PLANEJAMENTO, email_comprador], assunto, corpo)
 
 def email_lote_aprovados_planejamento(resumo_texto, total_itens, lista_emails_cds):
     assunto = '🟢 Módulo 2: ' + str(total_itens) + ' Item(ns) APROVADOS pelo Planejamento'
     corpo = 'Itens Liberados para Separacao\n\n' + str(resumo_texto)
     disparar_email([EMAIL_PLANEJAMENTO] + lista_emails_cds, assunto, corpo)
 
-def email_lote_recusados_planejamento(resumo_texto, total_itens):
-    assunto = '🔴 Módulo 2: ' + str(total_itens) + ' Item(ns) RECUSADOS pelo Planejamento'
-    corpo = 'Solicitacoes de Transferencia Recusadas\n\n' + str(resumo_texto)
-    disparar_email(EMAIL_COMPRAS, assunto, corpo)
+def email_lote_recusados_planejamento_individual(lote_recusados):
+    # Agrupa recusas por comprador criador
+    mapa_recusas_por_comprador = {}
+    for item in lote_recusados:
+        r = item['row']
+        criador = r['criado_por']
+        if criador not in mapa_recusas_por_comprador:
+            mapa_recusas_por_comprador[criador] = []
+        mapa_recusas_por_comprador[criador].append(item)
+
+    for criador, itens in mapa_recusas_por_comprador.items():
+        email_dest = obter_email_comprador(criador)
+        resumo_rp = ''
+        for item in itens:
+            r = item['row']
+            resumo_rp += '- ID #' + str(item['id_sol']) + ': ' + str(r['cod_produto']) + ' - ' + str(r['descricao']) + ' | Rota: ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | Motivo: ' + str(item['motivo']) + '\n'
+        
+        assunto = '🔴 Módulo 2: ' + str(len(itens)) + ' Item(ns) RECUSADOS pelo Planejamento'
+        corpo = f'Solicitacoes de Transferencia Recusadas (Criador: {criador})\n\n' + str(resumo_rp)
+        disparar_email(email_dest, assunto, corpo)
 
 def email_modulo_3_resumido(rota, nota_fiscal, volumetria_nota, total_itens, resumo_texto):
     assunto = '🔵 Módulo 3: Número do Pedido ' + str(nota_fiscal) + ' da Rota ' + str(rota) + ' Pronto para Cotação'
@@ -348,7 +379,7 @@ else:
                                 conn_op.commit()
                         
                         st.success('Ordem cadastrada com sucesso! IDs: ' + str(ids_gerados))
-                        email_modulo_1_multi(ids_gerados[0], resumo_texto_email, origem + ' ➔ ' + destino, len(ids_gerados))
+                        email_modulo_1_multi(ids_gerados[0], resumo_texto_email, origem + ' ➔ ' + destino, len(ids_gerados), st.session_state.nome)
                         st.session_state.carrinho_compras = []
                         st.rerun()
                     except Exception as e:
@@ -365,6 +396,7 @@ else:
                     for idx, row in df_hist.iterrows():
                         status = row['status_atual']
                         id_sol = row['id_solicitacao']
+                        criador_item = row['criado_por']
                         
                         if status == 'Pendente Aprovação': badge = '🟡 Pendente'
                         elif status == 'Aprovado': badge = '🟢 Aprovado'
@@ -373,7 +405,7 @@ else:
                         else: badge = '🔵 ' + str(status)
                         
                         with st.expander(badge + ' | ID #' + str(id_sol) + ' - ' + str(row['descricao']) + ' (' + str(row['cd_origem']) + ' ➔ ' + str(row['cd_destino']) + ')'):
-                            st.write('**Item:** ' + str(row['cod_produto']) + ' | **Quantidade:** ' + str(row['volume_solicitado']) + ' ' + str(row['unidade_medida']))
+                            st.write('**Item:** ' + str(row['cod_produto']) + ' | **Quantidade:** ' + str(row['volume_solicitado']) + ' ' + str(row['unidade_medida']) + ' | **Comprador:** ' + str(criador_item))
                             if row['justificativa_compras']:
                                 st.info('💬 Última Justificativa: ' + str(row['justificativa_compras']))
                                 
@@ -400,7 +432,7 @@ else:
                                                         ''', (n_qtd, n_just.strip(), id_sol))
                                                         conn_re.commit()
                                                 st.success('Item devolvido para análise!')
-                                                email_item_revisado_planejamento(id_sol, row['descricao'], row['cd_origem'] + ' -> ' + row['cd_destino'], n_qtd, n_just.strip())
+                                                email_item_revisado_planejamento(id_sol, row['descricao'], row['cd_origem'] + ' -> ' + row['cd_destino'], n_qtd, n_just.strip(), st.session_state.nome)
                                                 st.rerun()
                                                 
                                 with col_btn_del:
@@ -492,11 +524,7 @@ else:
                                         email_lote_aprovados_planejamento(resumo_ap, len(lote_aprov), list(set(emails_cds)))
                                         
                                     if lote_rec:
-                                        resumo_rp = ''
-                                        for item in lote_rec:
-                                            r = item['row']
-                                            resumo_rp += '- ID #' + str(item['id_sol']) + ': ' + str(r['cod_produto']) + ' - ' + str(r['descricao']) + ' | Rota: ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | Motivo: ' + str(item['motivo']) + '\n'
-                                        email_lote_recusados_planejamento(resumo_rp, len(lote_rec))
+                                        email_lote_recusados_planejamento_individual(lote_rec)
                                         
                                     st.success('Lote processado com sucesso!')
                                     st.rerun()
@@ -819,7 +847,6 @@ else:
                                     
                                     chk_conf = c2.checkbox('Conferir', key='chk_fase_' + str(id_sep))
                                     
-                                    # CAMPO SEM LIMITE MÁXIMO (permite informar quantidade superior se necessário)
                                     q_recebe_agora = c3.number_input('Qtd Recebida Agora', min_value=0, value=int(saldo_rec_pendente), key='qrec_fase_' + str(id_sep))
                                     
                                     lista_conf_inputs.append({
