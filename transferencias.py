@@ -35,9 +35,9 @@ EMAIL_PLANEJAMENTO = 'planejamento@friorio.com.br'
 
 # Mapeamento individual de Compras (Por Nome do Usuário no Banco)
 MAP_EMAILS_COMPRAS = {
-    'Comprador 01': 'conrado@friorio.com.br',
-    'Comprador 02': 'fernanda.lumertz@friorio.com.br',
-    'Comprador 03': 'jones.mauricio@friorio.com.br'
+    'Conrado Lima': 'conrado@friorio.com.br',
+    'Fernanda Lumertz': 'fernanda.lumertz@friorio.com.br',
+    'Jones Mauricio': 'jones.mauricio@friorio.com.br'
 }
 EMAIL_COMPRAS_PADRAO = list(MAP_EMAILS_COMPRAS.values())
 
