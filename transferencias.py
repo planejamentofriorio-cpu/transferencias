@@ -5,7 +5,7 @@ from psycopg2 import extras
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 
 CRED_OP = {
@@ -33,7 +33,6 @@ SMTP_PASSWORD = 'Cliffburton1982!'
 
 EMAIL_PLANEJAMENTO = 'planejamento@friorio.com.br'
 
-# Mapeamento individual de Compras (Por Nome do Usuário no Banco)
 MAP_EMAILS_COMPRAS = {
     'Conrado Lima': 'conrado@friorio.com.br',
     'Fernanda Lumertz': 'fernanda.lumertz@friorio.com.br',
@@ -103,15 +102,107 @@ def inicializar_banco_notas():
                         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='transferencia_notas_separacao' and column_name='quantidade_recebida') THEN
                             ALTER TABLE transferencia_notas_separacao ADD COLUMN quantidade_recebida INT DEFAULT 0;
                         END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='solicitacoes_transferencia' and column_name='data_ultimo_followup') THEN
+                            ALTER TABLE solicitacoes_transferencia ADD COLUMN data_ultimo_followup DATE;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='solicitacoes_transferencia' and column_name='followup_postergado_ate') THEN
+                            ALTER TABLE solicitacoes_transferencia ADD COLUMN followup_postergado_ate DATE;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='solicitacoes_transferencia' and column_name='followup_excluido') THEN
+                            ALTER TABLE solicitacoes_transferencia ADD COLUMN followup_excluido BOOLEAN DEFAULT FALSE;
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='solicitacoes_transferencia' and column_name='justificativa_followup') THEN
+                            ALTER TABLE solicitacoes_transferencia ADD COLUMN justificativa_followup TEXT;
+                        END IF;
                     END $$;
                 ''')
                 cur.execute('CREATE INDEX IF NOT EXISTS idx_transf_notas_solic ON transferencia_notas_separacao(id_solicitacao);')
                 cur.execute('CREATE INDEX IF NOT EXISTS idx_transf_notas_nf ON transferencia_notas_separacao(nota_fiscal);')
             conn.commit()
     except Exception as e:
-        print('Erro ao inicializar tabela de notas: ' + str(e))
+        print('Erro ao inicializar estrutura do banco: ' + str(e))
 
 inicializar_banco_notas()
+
+def formatar_data_br(dt_val, vazio_texto='Nunca enviado'):
+    if pd.isna(dt_val) or dt_val is None:
+        return vazio_texto
+    if isinstance(dt_val, str):
+        try:
+            dt_val = pd.to_datetime(dt_val)
+        except:
+            return dt_val
+    return dt_val.strftime('%d/%m/%Y')
+
+def obter_depto_responsavel(row):
+    status = row.get('status_atual')
+    if status == 'Pendente Aprovação':
+        return 'Planejamento (Aprovação de Demanda)'
+    elif status == 'Aprovado':
+        return f'CD Origem - {row.get("cd_origem")} (Separação Física)'
+    elif status == 'Pronto para Transporte':
+        return 'Transportes (Cotação e Despacho)'
+    elif status == 'Agendado':
+        return f'CD Destino - {row.get("cd_destino")} (Conferência e Recebimento)'
+    return str(status)
+
+def avaliar_status_followup(row, hoje_dt):
+    """
+    Retorna (situacao_chave, precisa_enviar, dias_decorridos, dt_ultimo_str, badge_html)
+    situacao_chave: 'excluido' | 'postergado' | 'vermelho' | 'verde' | ''
+    """
+    status = row.get('status_atual')
+    dt_cria = row.get('data_criacao')
+    dt_ult_raw = row.get('data_ultimo_followup')
+    dt_ult_str = formatar_data_br(dt_ult_raw)
+    excluido = bool(row.get('followup_excluido')) if pd.notna(row.get('followup_excluido')) else False
+    postergado_raw = row.get('followup_postergado_ate')
+    postergado_date = pd.to_datetime(postergado_raw).date() if pd.notna(postergado_raw) and postergado_raw is not None else None
+
+    if status in ['Concluído', 'Cancelado', 'CanceladoPlanejamento'] or pd.isna(dt_cria):
+        return '', False, 0, dt_ult_str, ''
+
+    dias_decorridos = (hoje_dt - pd.to_datetime(dt_cria).date()).days
+    if dias_decorridos < 7:
+        return '', False, dias_decorridos, dt_ult_str, ''
+
+    if excluido:
+        badge_html = (
+            f'<span style="background-color:#f3e5f5;color:#6a1b9a;padding:3px 8px;'
+            f'border-radius:6px;font-weight:600;border:1px solid #ce93d8;">'
+            f'🚫 Follow-up Excluído ({dias_decorridos}d) | Último: {dt_ult_str}</span>'
+        )
+        return 'excluido', False, dias_decorridos, dt_ult_str, badge_html
+
+    if postergado_date is not None and hoje_dt < postergado_date:
+        dt_post_str = postergado_date.strftime('%d/%m/%Y')
+        badge_html = (
+            f'<span style="background-color:#e8f5e9;color:#2e7d32;padding:3px 8px;'
+            f'border-radius:6px;font-weight:600;border:1px solid #a5d6a7;">'
+            f'🟢 Postergado até {dt_post_str} ({dias_decorridos}d) | Último: {dt_ult_str}</span>'
+        )
+        return 'postergado', False, dias_decorridos, dt_ult_str, badge_html
+
+    if pd.isna(dt_ult_raw) or dt_ult_raw is None:
+        precisa_enviar = True
+    else:
+        dt_ult_date = pd.to_datetime(dt_ult_raw).date()
+        precisa_enviar = dt_ult_date < hoje_dt
+
+    if precisa_enviar:
+        badge_html = (
+            f'<span style="background-color:#ffebee;color:#c62828;padding:3px 8px;'
+            f'border-radius:6px;font-weight:600;border:1px solid #ef9a9a;">'
+            f'🔴 Enviar Follow-up ({dias_decorridos}d) | Último: {dt_ult_str}</span>'
+        )
+        return 'vermelho', True, dias_decorridos, dt_ult_str, badge_html
+    else:
+        badge_html = (
+            f'<span style="background-color:#e8f5e9;color:#2e7d32;padding:3px 8px;'
+            f'border-radius:6px;font-weight:600;border:1px solid #a5d6a7;">'
+            f'🟢 Follow-up em Dia ({dias_decorridos}d) | Último: {dt_ult_str}</span>'
+        )
+        return 'verde', False, dias_decorridos, dt_ult_str, badge_html
 
 def obter_email_comprador(nome_criado_por):
     if nome_criado_por in MAP_EMAILS_COMPRAS:
@@ -168,10 +259,84 @@ def disparar_email(destinatarios, assunto, corpo_texto):
         }
         return False
 
+def enviar_followup_individual(row):
+    """
+    Envia follow-up exclusivamente para uma única solicitação (row) e grava
+    data_ultimo_followup = CURRENT_DATE na tabela solicitacoes_transferencia.
+    """
+    id_sol = int(row['id_solicitacao'])
+    status = row['status_atual']
+    hoje = datetime.now().date()
+    dt_criacao = pd.to_datetime(row['data_criacao']).date()
+    dias_decorridos = (hoje - dt_criacao).days
+    dt_formatada = dt_criacao.strftime('%d/%m/%Y')
+    criador = row['criado_por']
+
+    if status == 'Pendente Aprovação':
+        depto_responsavel = 'Planejamento (Aprovação de Demanda)'
+        destinatarios_etapa = [EMAIL_PLANEJAMENTO]
+    elif status == 'Aprovado':
+        depto_responsavel = f'CD Origem - {row["cd_origem"]} (Separação Física)'
+        destinatarios_etapa = obter_emails_destinatarios(row['cd_origem'])
+    elif status == 'Pronto para Transporte':
+        depto_responsavel = 'Transportes (Cotação e Despacho)'
+        destinatarios_etapa = EMAIL_TRANSPORTES
+    elif status == 'Agendado':
+        depto_responsavel = f'CD Destino - {row["cd_destino"]} (Conferência e Recebimento)'
+        destinatarios_etapa = obter_emails_destinatarios(row['cd_destino'])
+    else:
+        return False
+
+    email_solicitante = obter_email_comprador(criador)
+    lista_destinatarios = []
+    if isinstance(destinatarios_etapa, list):
+        lista_destinatarios.extend(destinatarios_etapa)
+    else:
+        lista_destinatarios.append(destinatarios_etapa)
+
+    lista_destinatarios.append(EMAIL_PLANEJAMENTO)
+    if isinstance(email_solicitante, list):
+        lista_destinatarios.extend(email_solicitante)
+    else:
+        lista_destinatarios.append(email_solicitante)
+
+    assunto = f'⏰ Follow-up ({dias_decorridos} dias): Transferência ID #{id_sol} Parada em [{status}]'
+    corpo = (
+        f'Alerta de Follow-up — Solicitação de Transferência Pendente\n\n'
+        f'A solicitação abaixo encontra-se há {dias_decorridos} dia(s) sem conclusão no fluxo:\n\n'
+        f'- ID da Solicitação: #{id_sol}\n'
+        f'- Data da Solicitação: {dt_formatada}\n'
+        f'- Dias Decorridos: {dias_decorridos} dias\n'
+        f'- Status Atual: {status}\n'
+        f'- Departamento Responsável pela Etapa: {depto_responsavel}\n'
+        f'- Produto: {row["cod_produto"]} - {row["descricao"]}\n'
+        f'- Quantidade: {row["volume_solicitado"]} {row["unidade_medida"]}\n'
+        f'- Rota: {row["cd_origem"]} ➔ {row["cd_destino"]}\n'
+        f'- Solicitante (Compras): {criador}\n\n'
+        f'Por gentileza, verificar e dar andamento na etapa sob responsabilidade de {depto_responsavel}.'
+    )
+
+    if disparar_email(lista_destinatarios, assunto, corpo):
+        with get_conn(CRED_OP) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    '''
+                    UPDATE solicitacoes_transferencia
+                    SET data_ultimo_followup = CURRENT_DATE,
+                        followup_excluido = FALSE
+                    WHERE id_solicitacao = %s
+                    ''',
+                    (id_sol,)
+                )
+            conn.commit()
+        return True
+    return False
+
 def email_modulo_1_multi(id_ordem, resumo_texto, rota, total_itens, comprador_nome):
     email_comprador = obter_email_comprador(comprador_nome)
+    dt_hoje = datetime.now().strftime('%d/%m/%Y')
     assunto = '🟡 Módulo 1: Nova Solicitação de Ordem de Carga Multi-Itens #' + str(id_ordem)
-    corpo = f'Nova Demanda de Transferencia Criada por {comprador_nome}\n\nO setor de Compras inseriu uma nova ordem de carga.\n- ID de Controle: #' + str(id_ordem) + '\n- Rota Comercial: ' + str(rota) + '\n- Total de Itens: ' + str(total_itens) + '\n\nItens Solicitados:\n' + str(resumo_texto)
+    corpo = f'Nova Demanda de Transferencia Criada por {comprador_nome}\n\nO setor de Compras inseriu uma nova ordem de carga.\n- ID de Controle: #' + str(id_ordem) + '\n- Data da Solicitação: ' + dt_hoje + '\n- Rota Comercial: ' + str(rota) + '\n- Total de Itens: ' + str(total_itens) + '\n\nItens Solicitados:\n' + str(resumo_texto)
     disparar_email([EMAIL_PLANEJAMENTO, email_comprador], assunto, corpo)
 
 def email_item_revisado_planejamento(id_solic, produto, rota, nova_qtd, justificativa, comprador_nome):
@@ -186,7 +351,6 @@ def email_lote_aprovados_planejamento(resumo_texto, total_itens, lista_emails_cd
     disparar_email([EMAIL_PLANEJAMENTO] + lista_emails_cds, assunto, corpo)
 
 def email_lote_recusados_planejamento_individual(lote_recusados):
-    # Agrupa recusas por comprador criador
     mapa_recusas_por_comprador = {}
     for item in lote_recusados:
         r = item['row']
@@ -200,7 +364,8 @@ def email_lote_recusados_planejamento_individual(lote_recusados):
         resumo_rp = ''
         for item in itens:
             r = item['row']
-            resumo_rp += '- ID #' + str(item['id_sol']) + ': ' + str(r['cod_produto']) + ' - ' + str(r['descricao']) + ' | Rota: ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | Motivo: ' + str(item['motivo']) + '\n'
+            dt_sol = formatar_data_br(r.get('data_criacao'))
+            resumo_rp += '- ID #' + str(item['id_sol']) + ' (Data: ' + dt_sol + '): ' + str(r['cod_produto']) + ' - ' + str(r['descricao']) + ' | Rota: ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | Motivo: ' + str(item['motivo']) + '\n'
         
         assunto = '🔴 Módulo 2: ' + str(len(itens)) + ' Item(ns) RECUSADOS pelo Planejamento'
         corpo = f'Solicitacoes de Transferencia Recusadas (Criador: {criador})\n\n' + str(resumo_rp)
@@ -263,7 +428,9 @@ else:
     st.sidebar.write('**Setor:** ' + str(st.session_state.depto))
     if st.session_state.cd_user:
         st.sidebar.write('**Unidade:** ' + str(st.session_state.cd_user))
-    if st.sidebar.button('Sair'):
+
+    st.sidebar.markdown('---')
+    if st.sidebar.button('Sair', use_container_width=True):
         st.session_state.logado = False
         st.session_state.carrinho_compras = []
         st.rerun()
@@ -393,10 +560,18 @@ else:
                 if df_hist.empty:
                     st.info('Nenhum histórico encontrado.')
                 else:
+                    hoje_dt = datetime.now().date()
                     for idx, row in df_hist.iterrows():
                         status = row['status_atual']
                         id_sol = row['id_solicitacao']
                         criador_item = row['criado_por']
+                        dt_cria_str = formatar_data_br(row.get('data_criacao'), 'N/I')
+                        
+                        dias_info = ''
+                        if pd.notna(row.get('data_criacao')) and status not in ['Concluído', 'Cancelado']:
+                            dias_abertos = (hoje_dt - pd.to_datetime(row['data_criacao']).date()).days
+                            if dias_abertos >= 7:
+                                dias_info = f' | ⚠️ {dias_abertos} dias'
                         
                         if status == 'Pendente Aprovação': badge = '🟡 Pendente'
                         elif status == 'Aprovado': badge = '🟢 Aprovado'
@@ -404,8 +579,8 @@ else:
                         elif status == 'Cancelado': badge = '⚪ Cancelado/Excluído'
                         else: badge = '🔵 ' + str(status)
                         
-                        with st.expander(badge + ' | ID #' + str(id_sol) + ' - ' + str(row['descricao']) + ' (' + str(row['cd_origem']) + ' ➔ ' + str(row['cd_destino']) + ')'):
-                            st.write('**Item:** ' + str(row['cod_produto']) + ' | **Quantidade:** ' + str(row['volume_solicitado']) + ' ' + str(row['unidade_medida']) + ' | **Comprador:** ' + str(criador_item))
+                        with st.expander(f'{badge} | ID #{id_sol} ({dt_cria_str}{dias_info}) - {row["descricao"]} ({row["cd_origem"]} ➔ {row["cd_destino"]})'):
+                            st.write(f'**Data da Solicitação:** {dt_cria_str} | **Item:** {row["cod_produto"]} | **Quantidade:** {row["volume_solicitado"]} {row["unidade_medida"]} | **Comprador:** {criador_item}')
                             if row['justificativa_compras']:
                                 st.info('💬 Última Justificativa: ' + str(row['justificativa_compras']))
                                 
@@ -448,7 +623,12 @@ else:
 
     elif st.session_state.depto == 'Planejamento':
         st.header('📊 Módulo de Planejamento - Avaliação de Demandas')
-        tab_aprov, tab_cancelar = st.tabs(['📋 Aprovar Linhas (Lote)', '🗑️ Gerenciar e Cancelar Transferências'])
+        hoje_dt = datetime.now().date()
+        tab_aprov, tab_cancelar, tab_followups = st.tabs([
+            '📋 Aprovar Linhas (Lote)',
+            '🗑️ Gerenciar e Cancelar Transferências',
+            '🔔 Follow-ups e Atrasos'
+        ])
         
         with tab_aprov:
             try:
@@ -464,8 +644,15 @@ else:
                         
                         for idx, r in df_sol.iterrows():
                             id_sol = r['id_solicitacao']
+                            dt_sol_str = formatar_data_br(r.get('data_criacao'), 'N/I')
+                            _, _, _, _, badge_fu = avaliar_status_followup(r, hoje_dt)
+
                             with st.container(border=True):
-                                st.markdown('**Item #' + str(id_sol) + '** — ' + str(r['cod_produto']) + ' - ' + str(r['descricao']))
+                                st.markdown(f'**Item #{id_sol}** (Solicitado em: **{dt_sol_str}**) — {r["cod_produto"]} - {r["descricao"]}')
+                                if badge_fu:
+                                    st.markdown(badge_fu, unsafe_allow_html=True)
+                                else:
+                                    st.caption(f'Último follow-up: {formatar_data_br(r.get("data_ultimo_followup"))}')
                                 st.write('**Rota:** ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | **Qtd:** ' + str(r['volume_solicitado']) + ' ' + str(r['unidade_medida']) + ' | **Solicitante:** ' + str(r['criado_por']))
                                 
                                 col_aprov, col_reprov, col_motivo = st.columns([1.5, 1.5, 5])
@@ -515,7 +702,8 @@ else:
                                         emails_cds = []
                                         for item in lote_aprov:
                                             r = item['row']
-                                            resumo_ap += '- ID #' + str(item['id_sol']) + ': ' + str(r['cod_produto']) + ' - ' + str(r['descricao']) + ' | Rota: ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | Qtd: ' + str(r['volume_solicitado']) + ' ' + str(r['unidade_medida']) + '\n'
+                                            dt_s = formatar_data_br(r.get('data_criacao'), 'N/I')
+                                            resumo_ap += '- ID #' + str(item['id_sol']) + ' (Data: ' + dt_s + '): ' + str(r['cod_produto']) + ' - ' + str(r['descricao']) + ' | Rota: ' + str(r['cd_origem']) + ' ➔ ' + str(r['cd_destino']) + ' | Qtd: ' + str(r['volume_solicitado']) + ' ' + str(r['unidade_medida']) + '\n'
                                             res_emails = obter_emails_destinatarios(r['cd_origem'])
                                             if isinstance(res_emails, list):
                                                 emails_cds.extend(res_emails)
@@ -571,8 +759,15 @@ else:
                     st.write(f'**Resultados encontrados ({len(df_busca)}):**')
                     for _, r in df_busca.iterrows():
                         id_s = r['id_solicitacao']
+                        dt_s = formatar_data_br(r.get('data_criacao'), 'N/I')
+                        _, _, _, _, badge_fu = avaliar_status_followup(r, hoje_dt)
+
                         with st.container(border=True):
-                            st.markdown(f'**ID #{id_s}** — Produto: `{r["cod_produto"]} - {r["descricao"]}` | Status Atual: `{r["status_atual"]}`')
+                            st.markdown(f'**ID #{id_s}** (Data: **{dt_s}**) — Produto: `{r["cod_produto"]} - {r["descricao"]}` | Status Atual: `{r["status_atual"]}`')
+                            if badge_fu:
+                                st.markdown(badge_fu, unsafe_allow_html=True)
+                            else:
+                                st.caption(f'Último follow-up: {formatar_data_br(r.get("data_ultimo_followup"))}')
                             st.write(f'**Rota:** {r["cd_origem"]} ➔ {r["cd_destino"]} | **Qtd:** {r["volume_solicitado"]} {r["unidade_medida"]} | **Criado por:** {r["criado_por"]}')
                             
                             with st.form(f'form_canc_id_{id_s}'):
@@ -591,12 +786,209 @@ else:
             except Exception as ex_busca:
                 st.error('Erro ao buscar transferências: ' + str(ex_busca))
 
+        with tab_followups:
+            st.subheader('🔔 Painel de Follow-ups e Atrasos (+7 dias) — Controle por ID')
+            st.markdown(
+                'Envio individual por **ID**, além de opções para **postergar** ou **excluir** o follow-up '
+                'quando algum departamento retornar com justificativa.'
+            )
+
+            try:
+                with get_conn(CRED_OP) as conn_fu:
+                    df_all_abertos = pd.read_sql('''
+                        SELECT *
+                        FROM solicitacoes_transferencia
+                        WHERE status_atual IN ('Pendente Aprovação', 'Aprovado', 'Pronto para Transporte', 'Agendado')
+                          AND data_criacao IS NOT NULL
+                          AND CURRENT_DATE - DATE(data_criacao) >= 7
+                        ORDER BY data_criacao ASC, id_solicitacao ASC
+                    ''', conn_fu)
+
+                if df_all_abertos.empty:
+                    st.info('Nenhuma solicitação com 7 dias ou mais de atraso no momento.')
+                else:
+                    registros_fu = []
+                    for _, r_fu in df_all_abertos.iterrows():
+                        sit_chave, precisa_env, dias_dec, dt_ult_s, badge_h = avaliar_status_followup(r_fu, hoje_dt)
+                        registros_fu.append({
+                            'row': r_fu,
+                            'situacao': sit_chave,
+                            'precisa_enviar': precisa_env,
+                            'dias_decorridos': dias_dec,
+                            'dt_ultimo_str': dt_ult_s,
+                            'badge_html': badge_h,
+                            'depto_resp': obter_depto_responsavel(r_fu)
+                        })
+
+                    total_atrasos = len(registros_fu)
+                    total_vermelho = sum(1 for x in registros_fu if x['situacao'] == 'vermelho')
+                    total_verde = sum(1 for x in registros_fu if x['situacao'] in ['verde', 'postergado'])
+                    total_excluidos = sum(1 for x in registros_fu if x['situacao'] == 'excluido')
+
+                    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
+                    col_k1.metric('Total em Atraso (+7d)', total_atrasos)
+                    col_k2.metric('🔴 Enviar Follow-up', total_vermelho)
+                    col_k3.metric('🟢 Em Dia / Postergados', total_verde)
+                    col_k4.metric('🚫 Excluídos', total_excluidos)
+
+                    st.markdown('---')
+                    col_flt1, col_flt2 = st.columns(2)
+                    status_opcoes = ['Todos', 'Pendente Aprovação', 'Aprovado', 'Pronto para Transporte', 'Agendado']
+                    sel_status_fu = col_flt1.selectbox('Filtrar por Status da Etapa', status_opcoes, key='flt_status_fu')
+                    sel_situacao_fu = col_flt2.selectbox(
+                        'Filtrar por Situação do Follow-up',
+                        ['Todos', 'Vermelho - Enviar hoje', 'Verde - Em dia / Postergado', 'Excluídos'],
+                        key='flt_sit_fu'
+                    )
+
+                    filtrados_fu = []
+                    for item_fu in registros_fu:
+                        r_item = item_fu['row']
+                        if sel_status_fu != 'Todos' and r_item['status_atual'] != sel_status_fu:
+                            continue
+                        if sel_situacao_fu == 'Vermelho - Enviar hoje' and item_fu['situacao'] != 'vermelho':
+                            continue
+                        if sel_situacao_fu == 'Verde - Em dia / Postergado' and item_fu['situacao'] not in ['verde', 'postergado']:
+                            continue
+                        if sel_situacao_fu == 'Excluídos' and item_fu['situacao'] != 'excluido':
+                            continue
+                        filtrados_fu.append(item_fu)
+
+                    if not filtrados_fu:
+                        st.info('Nenhuma pendência corresponde aos filtros selecionados.')
+                    else:
+                        for item_fu in filtrados_fu:
+                            r_item = item_fu['row']
+                            id_fu = int(r_item['id_solicitacao'])
+                            dt_sol_fmt = formatar_data_br(r_item.get('data_criacao'), 'N/I')
+                            dt_post_fmt = formatar_data_br(r_item.get('followup_postergado_ate'), 'Não postergado')
+                            just_fu_atual = r_item.get('justificativa_followup') if pd.notna(r_item.get('justificativa_followup')) else ''
+                            esta_excluido = item_fu['situacao'] == 'excluido'
+
+                            with st.container(border=True):
+                                col_info, col_btn_env = st.columns([4, 1.5])
+                                with col_info:
+                                    st.markdown(f'**ID #{id_fu}** — `{r_item["cod_produto"]} - {r_item["descricao"]}`')
+                                    st.markdown(item_fu['badge_html'], unsafe_allow_html=True)
+                                with col_btn_env:
+                                    st.write('')
+                                    if st.button(
+                                        '📤 Enviar Follow-up',
+                                        key=f'btn_env_id_{id_fu}',
+                                        type='primary' if item_fu['precisa_enviar'] else 'secondary',
+                                        use_container_width=True
+                                    ):
+                                        with st.spinner(f'Enviando follow-up do ID #{id_fu}...'):
+                                            ok_env = enviar_followup_individual(r_item)
+                                        if ok_env:
+                                            st.success(f'✅ Follow-up do ID #{id_fu} enviado e gravado!')
+                                            st.rerun()
+
+                                st.write(
+                                    f'**Data da Solicitação:** {dt_sol_fmt} | '
+                                    f'**Dias Decorridos:** {item_fu["dias_decorridos"]} dias | '
+                                    f'**Último Follow-up:** {item_fu["dt_ultimo_str"]} | '
+                                    f'**Postergado até:** {dt_post_fmt}'
+                                )
+                                st.write(
+                                    f'**Status Atual:** `{r_item["status_atual"]}` | '
+                                    f'**Responsável pela Etapa:** {item_fu["depto_resp"]}'
+                                )
+                                st.write(
+                                    f'**Rota:** {r_item["cd_origem"]} ➔ {r_item["cd_destino"]} | '
+                                    f'**Qtd:** {r_item["volume_solicitado"]} {r_item["unidade_medida"]} | '
+                                    f'**Solicitante:** {r_item["criado_por"]}'
+                                )
+                                if just_fu_atual:
+                                    st.info(f'📝 Justificativa registrada: {just_fu_atual}')
+
+                                with st.expander(f'⏱️ Postergar ou Excluir Follow-up do ID #{id_fu}'):
+                                    with st.form(f'form_acao_fu_{id_fu}'):
+                                        col_a1, col_a2 = st.columns([1.5, 3.5])
+                                        nova_data_post = col_a1.date_input(
+                                            'Postergar até',
+                                            value=(
+                                                pd.to_datetime(r_item['followup_postergado_ate']).date()
+                                                if pd.notna(r_item.get('followup_postergado_ate')) and r_item.get('followup_postergado_ate') is not None
+                                                else hoje_dt + timedelta(days=3)
+                                            ),
+                                            min_value=hoje_dt,
+                                            key=f'dt_post_{id_fu}'
+                                        )
+                                        just_input = col_a2.text_input(
+                                            'Justificativa do departamento / motivo',
+                                            value=just_fu_atual,
+                                            key=f'just_fu_{id_fu}'
+                                        )
+
+                                        col_b1, col_b2, col_b3 = st.columns(3)
+                                        btn_postergar = col_b1.form_submit_button('⏳ Postergar Follow-up', use_container_width=True)
+                                        btn_excluir_fu = col_b2.form_submit_button('🚫 Excluir Follow-up', use_container_width=True)
+                                        btn_reativar_fu = col_b3.form_submit_button('♻️ Reativar Follow-up', use_container_width=True)
+
+                                        if btn_postergar:
+                                            if not just_input.strip():
+                                                st.error('Informe a justificativa para postergar o follow-up.')
+                                            else:
+                                                with get_conn(CRED_OP) as conn_upd:
+                                                    with conn_upd.cursor() as cur:
+                                                        cur.execute(
+                                                            '''
+                                                            UPDATE solicitacoes_transferencia
+                                                            SET followup_postergado_ate = %s,
+                                                                followup_excluido = FALSE,
+                                                                justificativa_followup = %s
+                                                            WHERE id_solicitacao = %s
+                                                            ''',
+                                                            (nova_data_post, just_input.strip(), id_fu)
+                                                        )
+                                                    conn_upd.commit()
+                                                st.success(f'ID #{id_fu} postergado até {nova_data_post.strftime("%d/%m/%Y")}!')
+                                                st.rerun()
+
+                                        if btn_excluir_fu:
+                                            if not just_input.strip():
+                                                st.error('Informe a justificativa para excluir o follow-up.')
+                                            else:
+                                                with get_conn(CRED_OP) as conn_upd:
+                                                    with conn_upd.cursor() as cur:
+                                                        cur.execute(
+                                                            '''
+                                                            UPDATE solicitacoes_transferencia
+                                                            SET followup_excluido = TRUE,
+                                                                justificativa_followup = %s
+                                                            WHERE id_solicitacao = %s
+                                                            ''',
+                                                            (just_input.strip(), id_fu)
+                                                        )
+                                                    conn_upd.commit()
+                                                st.success(f'Follow-up do ID #{id_fu} excluído!')
+                                                st.rerun()
+
+                                        if btn_reativar_fu:
+                                            with get_conn(CRED_OP) as conn_upd:
+                                                with conn_upd.cursor() as cur:
+                                                    cur.execute(
+                                                        '''
+                                                        UPDATE solicitacoes_transferencia
+                                                        SET followup_excluido = FALSE,
+                                                            followup_postergado_ate = NULL
+                                                        WHERE id_solicitacao = %s
+                                                        ''',
+                                                        (id_fu,)
+                                                    )
+                                                conn_upd.commit()
+                                            st.success(f'Follow-up do ID #{id_fu} reativado!')
+                                            st.rerun()
+            except Exception as e_fu:
+                st.error('Erro ao carregar painel de follow-ups: ' + str(e_fu))
+
     elif st.session_state.depto == 'Transportes':
         st.header('🚛 Módulo de Cotação e Fretes')
         try:
             with get_conn(CRED_OP) as conn_op:
                 df_tr = pd.read_sql('''
-                    SELECT id_solicitacao, cod_produto, descricao, unidade_medida, cd_origem, cd_destino, volume_solicitado as quantidade_separada, status_atual 
+                    SELECT id_solicitacao, cod_produto, descricao, unidade_medida, cd_origem, cd_destino, volume_solicitado as quantidade_separada, status_atual, data_criacao 
                     FROM solicitacoes_transferencia 
                     WHERE status_atual = 'Pronto para Transporte'
                 ''', conn_op)
@@ -644,7 +1036,8 @@ else:
                         st.write('**Itens contemplados nesta rota:**')
                         for _, row_item in df_sub_grupo.iterrows():
                             nota_item = row_item['nota_fiscal'] if 'nota_fiscal' in row_item and pd.notna(row_item['nota_fiscal']) else 'S/N'
-                            st.markdown(f'- ID #{row_item["id_solicitacao"]} (Pedido/NF: {nota_item}): {row_item["cod_produto"]} - {row_item["descricao"]} (**{row_item["quantidade_separada"]} {row_item["unidade_medida"]}**)')
+                            dt_item = formatar_data_br(row_item.get('data_criacao'), 'N/I')
+                            st.markdown(f'- ID #{row_item["id_solicitacao"]} (Data: {dt_item} | Pedido/NF: {nota_item}): {row_item["cod_produto"]} - {row_item["descricao"]} (**{row_item["quantidade_separada"]} {row_item["unidade_medida"]}**)')
                         
                         ids_solic_lote = df_sub_grupo['id_solicitacao'].tolist()
                         
@@ -715,9 +1108,10 @@ else:
                             solicitado = int(row['volume_solicitado'])
                             ja_separado = int(row['total_ja_separado'])
                             saldo_restante = int(row['saldo_restante'])
+                            dt_sol_ori = formatar_data_br(row.get('data_criacao'), 'N/I')
                             
                             with st.container(border=True):
-                                st.markdown('**Item #' + str(id_sol) + '** — ' + str(row['cod_produto']) + ' - ' + str(row['descricao']) + ' (' + str(row['cd_origem']) + ' ➔ ' + str(row['cd_destino']) + ')')
+                                st.markdown(f'**Item #{id_sol}** (Solicitado em: **{dt_sol_ori}**) — {row["cod_produto"]} - {row["descricao"]} ({row["cd_origem"]} ➔ {row["cd_destino"]})')
                                 col_c1, col_c2, col_c3 = st.columns([2, 1.5, 2.5])
                                 col_c1.write('Saldo Pendente: **' + str(saldo_restante) + ' / ' + str(solicitado) + ' ' + str(row['unidade_medida']) + '** (Já sep: ' + str(ja_separado) + ')')
                                 
@@ -776,7 +1170,7 @@ else:
             try:
                 with get_conn(CRED_OP) as conn_op:
                     query_dest = '''
-                        SELECT s.id_solicitacao, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida, s.volume_solicitado as quantidade_separada, s.status_atual 
+                        SELECT s.id_solicitacao, s.cod_produto, s.descricao, s.cd_origem, s.cd_destino, s.unidade_medida, s.volume_solicitado as quantidade_separada, s.status_atual, s.data_criacao 
                         FROM solicitacoes_transferencia s
                         WHERE s.status_atual = 'Agendado' AND s.cd_destino = %s
                     '''
@@ -840,8 +1234,9 @@ else:
                                     q_sep = int(r['quantidade_separada'])
                                     q_rec_anterior = int(r.get('quantidade_recebida', 0) if pd.notna(r.get('quantidade_recebida')) else 0)
                                     saldo_rec_pendente = max(0, q_sep - q_rec_anterior)
+                                    dt_sol_dest = formatar_data_br(r.get('data_criacao'), 'N/I')
                                     
-                                    st.markdown(f'**Item ID #{id_solic}** — {r["cod_produto"]} - {r["descricao"]}')
+                                    st.markdown(f'**Item ID #{id_solic}** (Data Solic.: **{dt_sol_dest}**) — {r["cod_produto"]} - {r["descricao"]}')
                                     c1, c2, c3 = st.columns([4, 2, 2])
                                     c1.write(f'Separado no Pedido: **{q_sep}** {r["unidade_medida"]}')
                                     
